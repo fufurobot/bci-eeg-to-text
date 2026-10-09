@@ -1,0 +1,54 @@
+[project]
+name = "bci-eeg-to-text"
+version = "0.1.0"
+description = "CTC-based EEG-to-text decoding on the Chisco imagined-speech dataset"
+readme = "README.md"
+authors = [
+    { name = "fufu", email = "fufurobot@outlook.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "mne>=1.13.2",
+    "pyedflib>=0.1.42",
+    "torch==2.7.1+cu118",
+    "torchaudio==2.7.1",
+    "torchvision==0.22.1",
+]
+
+[project.scripts]
+bci-eeg-to-text = "bci_eeg_to_text.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }
+torchaudio = { index = "pytorch" }
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu118"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.10",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "realdata: requires the read-only eeg-text-bci-data dataset mount",
+    "slow: long-running test",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
