@@ -127,6 +127,14 @@ def cmd_prepare(args: argparse.Namespace) -> int:
 
 
 def _load_dataset(cache_dir: Path, n_samples: int):
+    """Load a trial dataset and tokenizer, inferring the channel count.
+
+    The channel count is read from the cache rather than hard-coded to 128 so a
+    decimated or channel-subset cache trains correctly instead of failing at the
+    first forward pass.
+    """
+    import numpy as np
+
     from bci_eeg_to_text.data import TrialDataset
     from bci_eeg_to_text.tokenizer import CharTokenizer
 
@@ -135,13 +143,16 @@ def _load_dataset(cache_dir: Path, n_samples: int):
         raise SystemExit(f"no cache files in {cache_dir}; run `prepare` first")
 
     texts: list[str] = []
-    import numpy as np
-
+    n_channels: int | None = None
     for path in caches:
         with np.load(path, allow_pickle=True) as data:
             texts.extend(str(t) for t in data["texts"])
+            if n_channels is None:
+                n_channels = int(data["n_channels"])
     tokenizer = CharTokenizer.build(texts)
-    return TrialDataset(caches, tokenizer, n_samples=n_samples), tokenizer
+    if n_channels is None:
+        raise SystemExit(f"cache files in {cache_dir} contain no trials")
+    return TrialDataset(caches, tokenizer, n_samples=n_samples), tokenizer, n_channels
 
 
 def cmd_train(args: argparse.Namespace) -> int:
@@ -157,13 +168,13 @@ def cmd_train(args: argparse.Namespace) -> int:
     )
 
     device = resolve_device(args.device)
-    dataset, tokenizer = _load_dataset(Path(args.cache), args.n_samples)
-    print(f"device={device} trials={len(dataset)} classes={len(tokenizer)}")
+    dataset, tokenizer, n_channels = _load_dataset(Path(args.cache), args.n_samples)
+    print(f"device={device} trials={len(dataset)} channels={n_channels} classes={len(tokenizer)}")
 
     torch.manual_seed(args.seed)
     model = EEGToTextCTC(
         ModelConfig(
-            n_channels=128,
+            n_channels=n_channels,
             n_classes=len(tokenizer),
             d_model=args.d_model,
             n_blocks=args.n_blocks,
@@ -225,7 +236,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     from bci_eeg_to_text.train import evaluate, make_batches, move_batch_to_device, resolve_device
 
     device = resolve_device(args.device)
-    dataset, tokenizer = _load_dataset(Path(args.cache), args.n_samples)
+    dataset, tokenizer, _ = _load_dataset(Path(args.cache), args.n_samples)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model = EEGToTextCTC(ModelConfig(**checkpoint["config"])).to(device)
     model.load_state_dict(checkpoint["model"])
