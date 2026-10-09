@@ -60,12 +60,23 @@ class TestFindPulses:
             trig[start : start + 10] = REWARD_PULSE
         assert find_pulses(trig).tolist() == [100, 400, 900]
 
-    def test_adjacent_pulses_are_separate(self) -> None:
-        """A pulse immediately after another is a distinct trial."""
+    def test_contiguous_run_is_one_pulse(self) -> None:
+        """Indices 5..14 are one unbroken run of the same value.
+
+        They are physically indistinguishable from a single 10-sample pulse, so
+        they must count once. (Real pulses are ~100 samples wide and separated
+        by ~10 s, so they never touch.)
+        """
+        trig = np.zeros(30, dtype=float)
+        trig[5:15] = REWARD_PULSE
+        assert find_pulses(trig).tolist() == [5]
+
+    def test_single_sample_gap_yields_two_pulses(self) -> None:
+        """A one-sample non-pulse gap is a real boundary."""
         trig = np.zeros(30, dtype=float)
         trig[5:10] = REWARD_PULSE
-        trig[10:15] = REWARD_PULSE
-        assert find_pulses(trig).tolist() == [5, 10]
+        trig[11:15] = REWARD_PULSE
+        assert find_pulses(trig).tolist() == [5, 11]
 
     def test_ignores_other_marker_values(self) -> None:
         """65280 is the baseline marker and must not be treated as a pulse."""
