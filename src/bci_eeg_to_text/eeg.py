@@ -64,12 +64,58 @@ def is_annex_pointer(path: str | Path) -> bool:
 
 
 def require_real_data(path: str | Path) -> None:
-    """Raise :class:`MissingDataError` if ``path`` is an annex pointer."""
+    """Raise :class:`MissingDataError` if ``path`` is not usable EDF data.
+
+    Catches both unfetched git-annex pointers and truncated partial downloads.
+    """
+    path = Path(path)
     if is_annex_pointer(path):
         raise MissingDataError(
-            f"{Path(path).name} is an unfetched git-annex pointer, not EDF data. "
+            f"{path.name} is an unfetched git-annex pointer, not EDF data. "
             "Fetch it with `datalad get` / `git annex get` from the dataset remote."
         )
+    if not is_readable_edf(path):
+        raise MissingDataError(
+            f"{path.name} cannot be read as EDF. It is most likely an incomplete "
+            f"download ({path.stat().st_size} bytes on disk). Fetch it again with "
+            "`datalad get` / `git annex get`."
+        )
+
+
+def is_readable_edf(path: str | Path) -> bool:
+    """Return True if pyedflib can open the file and read its header.
+
+    This is the authoritative check for a usable recording: it is the same
+    library used for reading, so it agrees exactly with what training will
+    experience. Truncated downloads fail here with "not EDF compliant
+    (Filesize)", and annex pointers fail because they contain no EDF header.
+    """
+    import pyedflib
+
+    try:
+        with pyedflib.EdfReader(str(path)) as reader:
+            labels = reader.getSignalLabels()
+            return bool(labels) and TRIGGER_CHANNEL in labels
+    except Exception:  # noqa: BLE001 - any failure means "not usable"
+        return False
+
+
+def usable_runs(root: str | Path) -> list[Path]:
+    """List runs that hold real, complete EDF data.
+
+    Skips unfetched annex pointers and truncated partial downloads. The Chisco
+    release ships 46 pointers and several truncated files, so training must
+    plan around the runs that actually exist locally.
+    """
+    return [p for p in iter_runs(root) if not is_incomplete(p)]
+
+
+def is_incomplete(path: str | Path) -> bool:
+    """Return True if ``path`` is an annex pointer or an unreadable download."""
+    path = Path(path)
+    if is_annex_pointer(path):
+        return True
+    return not is_readable_edf(path)
 
 
 @dataclass(frozen=True)
@@ -259,12 +305,3 @@ def iter_runs(root: str | Path) -> Iterator[Path]:
     :func:`usable_runs` to skip those.
     """
     yield from sorted(Path(root).glob("sub-*/ses-*/eeg/*_eeg.edf"))
-
-
-def usable_runs(root: str | Path) -> list[Path]:
-    """List runs that hold real EDF data, skipping unfetched annex pointers.
-
-    The Chisco release ships 46 of its 223 runs as pointer stubs, so training
-    must plan around the 177 that actually exist locally.
-    """
-    return [p for p in iter_runs(root) if not is_annex_pointer(p)]

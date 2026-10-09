@@ -16,6 +16,37 @@ from bci_eeg_to_text.eeg import (
 
 DATASET = "eeg-text-bci-data/bci-eeg/ds005170"
 
+#: Marker channel name used by the dataset.
+TRIGGER = "Trigger"
+
+
+def write_tiny_edf(path, *, include_trigger: bool = True):
+    """Write a minimal valid EDF file with pyedflib.
+
+    Using the real library keeps these tests honest: the file must be readable
+    by the same code path that reads the dataset.
+    """
+    import pyedflib
+
+    n_samples = 200
+    labels = ["EEG1", "EEG2"] + ([TRIGGER] if include_trigger else [])
+    signal_headers = [
+        pyedflib.highlevel.make_signal_header(
+            label,
+            sample_frequency=100,
+            physical_min=-200.0,
+            physical_max=200.0,
+            digital_min=-32768,
+            digital_max=32767,
+        )
+        for label in labels
+    ]
+    data = [np.zeros(n_samples, dtype=float) for _ in labels]
+    with pyedflib.EdfWriter(str(path), len(labels), file_type=pyedflib.FILETYPE_EDFPLUS) as writer:
+        writer.setSignalHeaders(signal_headers)
+        writer.writeSamples(data)
+    return path
+
 
 class TestRunId:
     def test_parses_bids_filename(self) -> None:
@@ -211,12 +242,39 @@ class TestAnnexPointers:
         with pytest.raises(MissingDataError, match="unfetched git-annex pointer"):
             require_real_data(ptr)
 
-    def test_require_real_data_passes_for_real_file(self, tmp_path) -> None:
+    def test_require_real_data_passes_for_readable_edf(self, tmp_path) -> None:
+        """A file pyedflib can genuinely open must not be flagged as missing."""
         from bci_eeg_to_text.eeg import require_real_data
 
-        real = tmp_path / "real.edf"
-        real.write_bytes(b"0       " + b"\x00" * 5000)
-        require_real_data(real)
+        require_real_data(write_tiny_edf(tmp_path / "tiny.edf"))
+
+    def test_require_real_data_rejects_unreadable_file(self, tmp_path) -> None:
+        """A truncated download must be reported, not parsed as data."""
+        from bci_eeg_to_text.eeg import MissingDataError, require_real_data
+
+        junk = tmp_path / "truncated.edf"
+        junk.write_bytes(b"0       " + b"\x00" * 5000)
+        with pytest.raises(MissingDataError, match="cannot be read as EDF"):
+            require_real_data(junk)
+
+    def test_is_readable_edf_is_false_for_pointer(self, tmp_path) -> None:
+        from bci_eeg_to_text.eeg import is_readable_edf
+
+        ptr = tmp_path / "stub.edf"
+        ptr.write_text("/annex/objects/SHA256E-s123--abc.edf\n")
+        assert not is_readable_edf(ptr)
+
+    def test_is_readable_edf_requires_the_trigger_channel(self, tmp_path) -> None:
+        """A recording without a Trigger channel cannot be aligned."""
+        from bci_eeg_to_text.eeg import is_readable_edf
+
+        edf = write_tiny_edf(tmp_path / "no_trigger.edf", include_trigger=False)
+        assert not is_readable_edf(edf)
+
+    def test_is_readable_edf_true_for_valid_file(self, tmp_path) -> None:
+        from bci_eeg_to_text.eeg import is_readable_edf
+
+        assert is_readable_edf(write_tiny_edf(tmp_path / "ok.edf"))
 
 
 @pytest.mark.realdata
