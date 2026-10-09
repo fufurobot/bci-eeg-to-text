@@ -71,6 +71,14 @@ class Beam:
         )
 
 
+def _normalized_score(beam: Beam) -> float:
+    """Length-normalized log-probability, used for both pruning and selection.
+
+    Shorter hypotheses are not penalized for having fewer terms in their sum.
+    """
+    return beam.log_prob / max(1, len(beam.tokens))
+
+
 def _accumulate(
     candidates: dict[tuple[int, ...], list[float]],
     prefix: tuple[int, ...],
@@ -95,12 +103,16 @@ def beam_search_decode(
     *,
     beam_width: int = 8,
     input_length: int | None = None,
+    normalize_by_length: bool = False,
 ) -> list[str]:
     """Prefix beam search over the CTC lattice for a single utterance.
 
     ``logits`` must be ``(time, classes)``. Beams are scored with
     ``log P(prefix | x)`` accumulated over both the blank-terminated and
     non-blank-terminated paths, which is the standard CTC prefix probability.
+
+    Beams are pruned by raw prefix probability, and the winner maximizes total
+    posterior unless ``normalize_by_length`` is set.
     """
     if logits.ndim != 2:
         raise ValueError(f"expected (time, classes), got {tuple(logits.shape)}")
@@ -121,19 +133,21 @@ def beam_search_decode(
         step = log_probs[t]
         candidates: dict[tuple[int, ...], list[float]] = {}
 
-        # Keep only the most promising beams at this step.
+        # Prune by raw prefix probability, which is the standard beam-search
+        # objective: it keeps the prefixes that carry the most posterior mass
+        # and will accumulate the most as further frames are consumed. Pruning
+        # by the length-normalized score instead discards short prefixes while
+        # they still have time to grow, which measurably degrades the result.
         ordered = sorted(beams.items(), key=lambda kv: kv[1].log_prob, reverse=True)[:beam_width]
 
         for prefix, beam in ordered:
-            # Extend with blank: prefix is unchanged.
-            p_blank_step, p_non_blank_step = float(step[blank]), float(step[blank])
-            _accumulate(
-                candidates,
-                prefix,
-                beam.log_prob_blank + p_blank_step,
-                beam.log_prob_non_blank + p_non_blank_step,
-                neg_inf,
-            )
+            # Extending with blank leaves the prefix unchanged. Emitting blank
+            # can only produce a blank-terminated path, so BOTH previous endings
+            # collapse into the blank slot and the non-blank slot gets nothing:
+            #   p_b(l, t) = (p_b(l, t-1) + p_nb(l, t-1)) * P(blank)
+            # Routing p_nb into the non-blank slot here loses probability mass
+            # and silently drops characters (e.g. "A blank A" decodes as "A").
+            _accumulate(candidates, prefix, beam.log_prob + float(step[blank]), neg_inf, neg_inf)
 
             for c in range(step.shape[-1]):
                 if c == blank:
@@ -155,11 +169,15 @@ def beam_search_decode(
     if not beams:
         return [""]
 
-    def score(beam: Beam) -> float:
-        # Normalize by length so long hypotheses are not unfairly penalized.
-        return beam.log_prob / max(1, len(beam.tokens))
-
-    best = max(beams.values(), key=score)
+    # CTC decoding is defined as maximizing the total posterior P(l | x), so
+    # select on raw log-probability. Length normalization is available as an
+    # explicit opt-in because it biases towards shorter output, which can help
+    # when a model emits fragmented text but is not the maximum-posterior
+    # answer.
+    if normalize_by_length:
+        best = max(beams.values(), key=_normalized_score)
+    else:
+        best = max(beams.values(), key=lambda beam: beam.log_prob)
     return [tokenizer.decode(list(best.tokens))]
 
 

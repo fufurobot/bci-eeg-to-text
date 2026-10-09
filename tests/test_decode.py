@@ -149,3 +149,141 @@ class TestSentenceAccuracy:
     def test_rejects_length_mismatch(self) -> None:
         with pytest.raises(ValueError, match="equal length"):
             sentence_accuracy(["你"], [])
+
+
+def exact_ctc_distribution(
+    logits: torch.Tensor, tokenizer: CharTokenizer
+) -> dict[tuple[int, ...], float]:
+    """Exact CTC posterior over collapsed label sequences by path enumeration.
+
+    Enumerates every alignment of length T, collapses it with the CTC rule and
+    sums the probabilities. Exponential, so tiny inputs only -- but this is the
+    ground truth that beam search must reproduce.
+
+    Keyed by the collapsed **id tuple**, never by decoded text: ``decode`` drops
+    UNK, so distinct sequences such as ``(想,)`` and ``(UNK, 想)`` would merge
+    and inflate each other's mass, making a correct decoder look wrong.
+    """
+    import itertools
+    import math
+    from collections import defaultdict
+
+    log_probs = torch.log_softmax(logits.float(), dim=-1)
+    time, n_classes = log_probs.shape
+    blank = tokenizer.blank
+    total: dict[tuple[int, ...], float] = defaultdict(float)
+    for path in itertools.product(range(n_classes), repeat=time):
+        log_p = sum(float(log_probs[t, path[t]]) for t in range(time))
+        collapsed: list[int] = []
+        previous: int | None = None
+        for token in path:
+            if token != previous and token != blank:
+                collapsed.append(token)
+            previous = token
+        total[tuple(collapsed)] += math.exp(log_p)
+    return dict(total)
+
+
+def _as_text(tokenizer: CharTokenizer, ids: tuple[int, ...]) -> str:
+    """Render a collapsed id tuple as text for readable assertions."""
+    return tokenizer.decode(list(ids))
+
+
+class TestBeamSearchCorrectness:
+    """Regression tests for a blank-transition bug that dropped characters."""
+
+    def test_blank_can_separate_a_doubled_character(self, tokenizer: CharTokenizer) -> None:
+        """A blank between identical labels must be ABLE to yield two chars.
+
+        This does not assert that the doubled output wins -- the maximum
+        posterior may still be the single character -- only that the doubled
+        hypothesis retains the mass coming through the blank path. Before the
+        blank-transition fix it was unreachable.
+        """
+        a = tokenizer.stoi["我"]
+        logits = torch.zeros(3, len(tokenizer))
+        logits[0, a] = 3.0
+        logits[2, a] = 3.0
+        exact = exact_ctc_distribution(logits, tokenizer)
+
+        # The doubled hypothesis must carry real mass, roughly 5/6 of the single
+        # one here, rather than collapsing to ~0.
+        doubled = exact[(a, a)]
+        assert doubled > 0.1, f"doubled hypothesis lost its mass: {doubled}"
+
+        # And beam search must agree with exact about the winner.
+        expected = _as_text(tokenizer, max(exact, key=lambda k: exact[k]))
+        got = beam_search_decode(logits, tokenizer, beam_width=8)[0]
+        assert got == expected
+
+    def test_blank_separated_repeat_wins_when_it_is_the_best(
+        self, tokenizer: CharTokenizer
+    ) -> None:
+        """When the middle frame strongly favours blank, two chars must win."""
+        a = tokenizer.stoi["我"]
+        logits = torch.full((3, len(tokenizer)), -6.0)
+        logits[0, a] = 3.0
+        logits[1, 0] = 3.0
+        logits[2, a] = 3.0
+        exact = exact_ctc_distribution(logits, tokenizer)
+        expected = _as_text(tokenizer, max(exact, key=lambda k: exact[k]))
+        assert expected == "我我", f"expected doubled output, exact best was {expected!r}"
+        assert beam_search_decode(logits, tokenizer, beam_width=8)[0] == "我我"
+
+    def test_matches_exact_argmax(self, tokenizer: CharTokenizer) -> None:
+        """With a wide beam, beam search must find the exact CTC argmax.
+
+        CTC decoding maximizes the total posterior P(l | x), so that is the
+        reference here. The comparison is on decoded *text*: ``decode`` drops
+        UNK, so distinct id sequences can render identically and re-encoding
+        the output is not a faithful inverse.
+        """
+        torch.manual_seed(0)
+        for trial in range(40):
+            logits = torch.randn(4, len(tokenizer)) * 2.0
+            exact = exact_ctc_distribution(logits, tokenizer)
+            best_text = _as_text(tokenizer, max(exact, key=lambda k: exact[k]))
+            got = beam_search_decode(logits, tokenizer, beam_width=512)[0]
+            assert got == best_text, (
+                f"trial {trial}: got {got!r}, exact argmax {best_text!r}, logits={logits.tolist()}"
+            )
+
+    def test_length_normalization_is_opt_in(self, tokenizer: CharTokenizer) -> None:
+        """Normalizing favours shorter output, so it must not change the default."""
+        torch.manual_seed(0)
+        logits = torch.randn(4, len(tokenizer)) * 2.0
+        default = beam_search_decode(logits, tokenizer, beam_width=512)[0]
+        normalized = beam_search_decode(
+            logits, tokenizer, beam_width=512, normalize_by_length=True
+        )[0]
+        assert len(normalized) <= len(default) + 1
+
+    def test_blank_transition_conserves_mass(self, tokenizer: CharTokenizer) -> None:
+        """The posterior must sum to 1, so no probability is misrouted."""
+        torch.manual_seed(1)
+        logits = torch.randn(3, len(tokenizer))
+        exact = exact_ctc_distribution(logits, tokenizer)
+        assert abs(sum(exact.values()) - 1.0) < 1e-6
+
+    def test_does_not_drop_characters_on_uncertain_input(self, tokenizer: CharTokenizer) -> None:
+        """The original bug returned a prefix with far less mass than the truth."""
+        torch.manual_seed(0)
+        logits = torch.randn(4, len(tokenizer)) * 2.0
+        exact = exact_ctc_distribution(logits, tokenizer)
+        got = beam_search_decode(logits, tokenizer, beam_width=512)[0]
+        assert got == _as_text(tokenizer, max(exact, key=lambda k: exact[k]))
+
+    def test_repeat_branch_matches_exact_on_blank_separated_pairs(
+        self, tokenizer: CharTokenizer
+    ) -> None:
+        """Systematic check of the repeat/blank interaction against exact truth."""
+        a = tokenizer.stoi["我"]
+        for p_char in (0.2, 0.5, 0.9):
+            logits = torch.full((3, len(tokenizer)), 0.01)
+            logits[0, a] = p_char
+            logits[1, 0] = p_char
+            logits[2, a] = p_char
+            exact = exact_ctc_distribution(logits, tokenizer)
+            expected = _as_text(tokenizer, max(exact, key=lambda k: exact[k]))
+            got = beam_search_decode(logits, tokenizer, beam_width=64)[0]
+            assert got == expected, f"p_char={p_char}: got {got!r}, exact {expected!r}"
