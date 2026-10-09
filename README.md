@@ -33,6 +33,19 @@ Known dataset quirks:
 - Despite the derivatives listing a `task-read`, **no `task-read` EDF exists** —
   all 223 runs are `task-imagine`.
 - The pulse is assumed to mark trial **onset**; see `ExtractConfig.pre_samples`.
+- **Only 168 of the 223 runs are usable.** 46 are unfetched git-annex pointers
+  (all 45 of `sub-03`, plus one run in `sub-01`) and 9 are truncated partial
+  downloads (~38 MB but ending early, with valid-looking headers). Fetch the
+  rest with `datalad get` / `git annex get`. The pipeline detects both and
+  reports them instead of failing with a cryptic parse error; see
+  [issue #2](https://github.com/fufurobot/bci-eeg-to-text/issues/2).
+
+Alignment is checked reproducibly:
+
+```bash
+uv run python scripts/verify_alignment.py            # sampled, one run per session
+uv run python scripts/verify_alignment.py --all      # every run (slow on this mount)
+```
 
 ## Pipeline
 
