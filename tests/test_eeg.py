@@ -177,3 +177,61 @@ class TestAgainstRealDataset:
         # And alignment must succeed rather than raise.
         segs = align_segments(pulses, texts, n_samples=trig.shape[1])
         assert len(segs) == 150
+
+
+class TestAnnexPointers:
+    """The Chisco release ships many runs as unfetched git-annex pointers."""
+
+    def test_detects_pointer_file(self, tmp_path) -> None:
+        from bci_eeg_to_text.eeg import is_annex_pointer
+
+        ptr = tmp_path / "sub-01_ses-01_task-imagine_run-01_eeg.edf"
+        ptr.write_text(
+            "/annex/objects/SHA256E-s644413760--1a7392a6fdd8aa2b6b518c92198224f8e5ed9bb.edf\n"
+        )
+        assert is_annex_pointer(ptr)
+
+    def test_real_edf_is_not_a_pointer(self, tmp_path) -> None:
+        from bci_eeg_to_text.eeg import is_annex_pointer
+
+        real = tmp_path / "real.edf"
+        real.write_bytes(b"0       " + b"\x00" * 5000)
+        assert not is_annex_pointer(real)
+
+    def test_missing_file_is_not_a_pointer(self, tmp_path) -> None:
+        from bci_eeg_to_text.eeg import is_annex_pointer
+
+        assert not is_annex_pointer(tmp_path / "nope.edf")
+
+    def test_require_real_data_raises_helpfully(self, tmp_path) -> None:
+        from bci_eeg_to_text.eeg import MissingDataError, require_real_data
+
+        ptr = tmp_path / "stub.edf"
+        ptr.write_text("/annex/objects/SHA256E-s123--abc.edf\n")
+        with pytest.raises(MissingDataError, match="unfetched git-annex pointer"):
+            require_real_data(ptr)
+
+    def test_require_real_data_passes_for_real_file(self, tmp_path) -> None:
+        from bci_eeg_to_text.eeg import require_real_data
+
+        real = tmp_path / "real.edf"
+        real.write_bytes(b"0       " + b"\x00" * 5000)
+        require_real_data(real)
+
+
+@pytest.mark.realdata
+class TestDatasetInventory:
+    def test_reports_pointer_and_real_run_counts(self) -> None:
+        """Documents the 46-stub / 177-real split of this release."""
+        from pathlib import Path
+
+        from bci_eeg_to_text.eeg import is_annex_pointer, iter_runs, usable_runs
+
+        root = Path(DATASET)
+        if not root.exists():
+            pytest.skip("dataset not mounted")
+        all_runs = list(iter_runs(root))
+        usable = usable_runs(root)
+        assert len(all_runs) == 223, f"expected 223 runs, found {len(all_runs)}"
+        assert all(not is_annex_pointer(p) for p in usable)
+        assert len(usable) == 177, f"expected 177 usable runs, found {len(usable)}"

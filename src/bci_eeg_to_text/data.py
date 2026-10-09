@@ -25,6 +25,7 @@ from bci_eeg_to_text.eeg import (
     NON_EEG_CHANNELS,
     TRIGGER_CHANNEL,
     AlignmentError,
+    RunId,
     align_segments,
     find_pulses,
     read_metadata,
@@ -70,14 +71,25 @@ def extract_run(
     dataset_root = Path(dataset_root)
     out_path = Path(out_path)
 
+    # Read the trigger channel first: it is a single channel, so this is fast
+    # even when the mount is slow, and it lets alignment fail early before
+    # paying for the expensive full-band read.
+    trigger, sample_rate = read_signals(edf_path, [TRIGGER_CHANNEL])
+    pulses = find_pulses(trigger[0])
+
+    run_id = RunId.parse(edf_path.name)
+    split_path = split_file_for_run(dataset_root / "textdataset", run_id.run)
+    texts = read_split(split_path)
+    if len(pulses) != len(texts):
+        raise AlignmentError(
+            f"{run_id.key}: reward pulses ({len(pulses)}) != target sentences "
+            f"({len(texts)}); refusing to train on misaligned pairs - see issue #1"
+        )
+
     meta = read_metadata(edf_path)
     eeg_names = [c for c in meta.channel_names if c not in NON_EEG_CHANNELS]
-    signals, sample_rate = read_signals(edf_path, [*eeg_names, TRIGGER_CHANNEL])
-    eeg, trigger = signals[:-1], signals[-1]
-
-    pulses = find_pulses(trigger)
-    split_path = split_file_for_run(dataset_root / "textdataset", meta.run_id.run)
-    texts = read_split(split_path)
+    signals, sample_rate = read_signals(edf_path, eeg_names)
+    eeg = signals
 
     segments = align_segments(
         pulses,

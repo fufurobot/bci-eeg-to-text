@@ -37,6 +37,41 @@ class AlignmentError(RuntimeError):
     """Raised when EEG segments cannot be aligned to target sentences."""
 
 
+class MissingDataError(RuntimeError):
+    """Raised when an EDF file is a git-annex pointer rather than real data.
+
+    This dataset is distributed via DataLad/git-annex. Files whose content was
+    never fetched are small text pointers, not EDF. Reading one produces a
+    confusing "not EDF compliant" error, so it is detected explicitly.
+    """
+
+
+#: Anything at most this large could be an annex pointer rather than EDF.
+ANNEX_POINTER_MAX_BYTES = 4096
+_ANNEX_POINTER_RE = re.compile(rb"^/annex/objects/\S+")
+
+
+def is_annex_pointer(path: str | Path) -> bool:
+    """Return True if ``path`` is an unfetched git-annex pointer stub."""
+    path = Path(path)
+    try:
+        if path.stat().st_size > ANNEX_POINTER_MAX_BYTES:
+            return False
+        with path.open("rb") as handle:
+            return bool(_ANNEX_POINTER_RE.match(handle.read(64)))
+    except OSError:
+        return False
+
+
+def require_real_data(path: str | Path) -> None:
+    """Raise :class:`MissingDataError` if ``path`` is an annex pointer."""
+    if is_annex_pointer(path):
+        raise MissingDataError(
+            f"{Path(path).name} is an unfetched git-annex pointer, not EDF data. "
+            "Fetch it with `datalad get` / `git annex get` from the dataset remote."
+        )
+
+
 @dataclass(frozen=True)
 class RunId:
     """Identity of a single BIDS EEG run."""
@@ -105,6 +140,7 @@ def read_signals(
     """
     import pyedflib
 
+    require_real_data(path)
     with pyedflib.EdfReader(str(path)) as reader:
         available = list(reader.getSignalLabels())
         names = available if channels is None else list(channels)
@@ -121,6 +157,7 @@ def read_metadata(path: str | Path) -> RunMeta:
     import pyedflib
 
     path = Path(path)
+    require_real_data(path)
     with pyedflib.EdfReader(str(path)) as reader:
         labels = list(reader.getSignalLabels())
         eeg = [c for c in labels if c not in NON_EEG_CHANNELS]
@@ -216,5 +253,18 @@ def align_segments(
 
 
 def iter_runs(root: str | Path) -> Iterator[Path]:
-    """Yield every EDF run under a dataset root, sorted for determinism."""
+    """Yield every EDF run under a dataset root, sorted for determinism.
+
+    Includes runs whose files are still annex pointers; use
+    :func:`usable_runs` to skip those.
+    """
     yield from sorted(Path(root).glob("sub-*/ses-*/eeg/*_eeg.edf"))
+
+
+def usable_runs(root: str | Path) -> list[Path]:
+    """List runs that hold real EDF data, skipping unfetched annex pointers.
+
+    The Chisco release ships 46 of its 223 runs as pointer stubs, so training
+    must plan around the 177 that actually exist locally.
+    """
+    return [p for p in iter_runs(root) if not is_annex_pointer(p)]

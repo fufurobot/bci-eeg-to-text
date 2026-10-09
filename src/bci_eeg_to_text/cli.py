@@ -105,13 +105,19 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = []
     for i, run in enumerate(runs, 1):
-        cache = out_dir / f"{run.parent.parent.name}_{run.stem}.npz"
+        # Name the cache after the run alone; run indices are globally unique,
+        # so including the session would just duplicate information.
+        cache = out_dir / f"{run.stem}.npz"
         if cache.exists():
             print(f"[{i}/{len(runs)}] cached {cache.name}")
             continue
         info = extract_run(run, args.data_root, cache, config=ExtractConfig(decimate=args.decimate))
         manifest.append(info)
-        print(f"[{i}/{len(runs)}] {info['subject']} run {info['run']}: {info['n_trials']} trials")
+        print(
+            f"[{i}/{len(runs)}] {info['subject']} run {info['run']}: "
+            f"{info['n_trials']} trials -> {cache.name}",
+            flush=True,
+        )
 
     (out_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
