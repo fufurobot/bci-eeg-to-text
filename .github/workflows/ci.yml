@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install 3.13
+      - name: Lint
+        run: |
+          uv venv
+          uv pip install ruff
+          uv run ruff check src tests
+          uv run ruff format --check src tests
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install 3.13
+
+      # CI has no GPU, so install CPU-only PyTorch instead of the project's
+      # default CUDA index. The CUDA wheels are also several GB larger.
+      - name: Install dependencies
+        run: |
+          uv venv
+          uv pip install --index-url https://download.pytorch.org/whl/cpu torch
+          uv pip install mne pyedflib pytest pytest-cov
+          uv pip install -e . --no-deps
+
+      # Real-data tests need the Chisco dataset (an external ~143 GB mount).
+      # They skip themselves when it is absent, which is the case in CI.
+      - name: Test
+        run: uv run pytest -q -m "not realdata"
