@@ -8,13 +8,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from bci_eeg_to_text.backbones import TRAINING_MODES
 from bci_eeg_to_text.cli import build_parser, cmd_inspect, main
 
 
 def write_cache(path: Path, n_trials: int, text: str = "你好") -> Path:
     """Write a cache in the format extract_run produces."""
     rng = np.random.default_rng(0)
-    trials = [rng.standard_normal((4, 128)).astype(np.float32) for _ in range(n_trials)]
+    # Long enough that the x512 conv stride still leaves several CTC frames.
+    trials = [rng.standard_normal((4, 2048)).astype(np.float32) for _ in range(n_trials)]
     flat = np.concatenate(trials, axis=1)
     offsets = np.zeros(n_trials + 1, dtype=np.int64)
     np.cumsum([t.shape[1] for t in trials], out=offsets[1:])
@@ -150,7 +152,7 @@ class TestEndToEndOnSyntheticCache:
                 "--batch-size",
                 "2",
                 "--n-samples",
-                "128",
+                "2048",
                 "--d-model",
                 "16",
                 "--n-blocks",
@@ -180,7 +182,7 @@ class TestEndToEndOnSyntheticCache:
                 "--batch-size",
                 "2",
                 "--n-samples",
-                "128",
+                "2048",
                 "--d-model",
                 "16",
                 "--n-blocks",
@@ -200,7 +202,7 @@ class TestEndToEndOnSyntheticCache:
                 "--device",
                 "cpu",
                 "--n-samples",
-                "128",
+                "2048",
             ]
         )
         assert code == 0
@@ -217,7 +219,7 @@ class TestEndToEndOnSyntheticCache:
                 "--epochs",
                 "1",
                 "--n-samples",
-                "128",
+                "2048",
                 "--d-model",
                 "16",
                 "--n-blocks",
@@ -236,7 +238,7 @@ class TestEndToEndOnSyntheticCache:
                 "--device",
                 "cpu",
                 "--n-samples",
-                "128",
+                "2048",
                 "--beam-width",
                 "3",
             ]
@@ -257,7 +259,7 @@ class TestEndToEndOnSyntheticCache:
                 "--epochs",
                 "1",
                 "--n-samples",
-                "128",
+                "2048",
                 "--d-model",
                 "16",
                 "--n-blocks",
@@ -286,7 +288,7 @@ class TestEndToEndOnSyntheticCache:
                 "--epochs",
                 "1",
                 "--n-samples",
-                "128",
+                "2048",
                 "--d-model",
                 "16",
                 "--n-blocks",
@@ -296,7 +298,12 @@ class TestEndToEndOnSyntheticCache:
             ]
         )
         checkpoint = torch.load(out / "last.pt", map_location="cpu", weights_only=False)
-        assert checkpoint["config"]["n_classes"] == len(checkpoint["vocab"])
+        # The checkpoint must carry everything evaluate() needs to rebuild the
+        # exact architecture; otherwise a reload silently mismatches the head.
+        assert checkpoint["n_classes"] == len(checkpoint["vocab"])
+        assert checkpoint["mode"] in TRAINING_MODES
+        assert "backbone_kwargs" in checkpoint
+        assert checkpoint["n_channels"] > 0
 
     def test_training_report_is_valid_json_metrics(
         self, cache_dir: Path, tmp_path: Path, capsys
@@ -312,7 +319,7 @@ class TestEndToEndOnSyntheticCache:
                 "--epochs",
                 "1",
                 "--n-samples",
-                "128",
+                "2048",
                 "--d-model",
                 "16",
                 "--n-blocks",
@@ -331,7 +338,7 @@ class TestEndToEndOnSyntheticCache:
                 "--device",
                 "cpu",
                 "--n-samples",
-                "128",
+                "2048",
             ]
         )
         out_text = capsys.readouterr().out

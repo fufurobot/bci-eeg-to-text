@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+from bci_eeg_to_text.backbones import TRAINING_MODES
+
 #: Parent directory holding both datasets as subdirectories.
 DEFAULT_DATA_ROOT = "eeg-text-bci-data/bci-eeg"
 
@@ -75,6 +77,45 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--n-samples", type=int, default=8000)
     p_train.add_argument("--d-model", type=int, default=256)
     p_train.add_argument("--n-blocks", type=int, default=4)
+    p_train.add_argument(
+        "--mode",
+        default="scratch",
+        choices=list(TRAINING_MODES),
+        help=(
+            "scratch: conv encoder from scratch | "
+            "bert-ctc: pretrained BERT + CTC head | "
+            "neurolm-sft: fine-tune the full NeuroLM model | "
+            "neurolm-adapter: HF causal LM + adapter (+ NeuroProcessor)"
+        ),
+    )
+    p_train.add_argument(
+        "--pretrained",
+        default=None,
+        help="checkpoint name/path for the pretrained backbone (BERT or NeuroProcessor)",
+    )
+    p_train.add_argument(
+        "--freeze-backbone",
+        action="store_true",
+        help="freeze the pretrained encoder and train only adapters and the CTC head",
+    )
+    p_train.add_argument(
+        "--processor",
+        default=None,
+        choices=["scratch", "pretrained"],
+        help="for neurolm-adapter: train the NeuroProcessor from scratch, or use a pretrained one",
+    )
+    p_train.add_argument(
+        "--lm-name", default=None, help="HuggingFace causal LM for the neurolm modes"
+    )
+    p_train.add_argument(
+        "--eeg-tokens", type=int, default=None, help="positional embedding size for EEG frames"
+    )
+    p_train.add_argument(
+        "--frontend-stride",
+        type=int,
+        default=16,
+        help="temporal stride of the convolutional front-end (bert-ctc)",
+    )
     p_train.add_argument("--seed", type=int, default=0)
     p_train.add_argument(
         "--max-steps", type=int, default=None, help="stop after N optimizer steps (smoke test)"
@@ -328,7 +369,7 @@ def _load_dataset(cache_dir: Path, n_samples: int):
 def cmd_train(args: argparse.Namespace) -> int:
     import torch
 
-    from bci_eeg_to_text.model import EEGToTextCTC, ModelConfig
+    from bci_eeg_to_text.backbones import build_ctc_model
     from bci_eeg_to_text.train import (
         TrainConfig,
         evaluate,
@@ -339,17 +380,38 @@ def cmd_train(args: argparse.Namespace) -> int:
 
     device = resolve_device(args.device)
     dataset, tokenizer, n_channels = _load_dataset(Path(args.cache), args.n_samples)
-    print(f"device={device} trials={len(dataset)} channels={n_channels} classes={len(tokenizer)}")
+    print(
+        f"device={device} mode={args.mode} trials={len(dataset)} "
+        f"channels={n_channels} classes={len(tokenizer)}"
+    )
 
     torch.manual_seed(args.seed)
-    model = EEGToTextCTC(
-        ModelConfig(
-            n_channels=n_channels,
-            n_classes=len(tokenizer),
-            d_model=args.d_model,
-            n_blocks=args.n_blocks,
-        )
+    extra: dict[str, object] = {"frontend_stride": args.frontend_stride}
+    if args.eeg_tokens:
+        extra["eeg_tokens"] = args.eeg_tokens
+    if args.processor:
+        extra["processor"] = args.processor
+    if args.lm_name:
+        extra["lm_name"] = args.lm_name
+
+    model = build_ctc_model(
+        args.mode,
+        n_channels=n_channels,
+        n_classes=len(tokenizer),
+        d_model=args.d_model,
+        pretrained=args.pretrained,
+        freeze_backbone=args.freeze_backbone,
+        extra=extra,
     ).to(device)
+
+    summary = model.parameter_summary()
+    print(
+        f"parameters: total={summary['total']:,.0f} "
+        f"trainable={summary['trainable']:,.0f} "
+        f"({summary['trainable_fraction']:.1%}) frozen={summary['frozen']:,.0f}"
+    )
+    if args.freeze_backbone and summary["trainable_fraction"] >= 1.0:
+        print("warning: --freeze-backbone had no effect for this mode", file=sys.stderr)
 
     trials = [dataset[i] for i in range(len(dataset))]
     split = max(1, int(len(trials) * 0.9))
@@ -357,8 +419,12 @@ def cmd_train(args: argparse.Namespace) -> int:
     valid_batches = make_batches(trials[split:], args.batch_size)
 
     config = TrainConfig(epochs=args.epochs, batch_size=args.batch_size, learning_rate=args.lr)
+    # Optimise only what is trainable; passing frozen weights to AdamW wastes
+    # memory on their state and can silently unfreeze them via weight decay.
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
+        model.trainable_parameters(),
+        lr=config.learning_rate,
+        weight_decay=config.weight_decay,
     )
 
     out_dir = Path(args.out)
@@ -380,7 +446,15 @@ def cmd_train(args: argparse.Namespace) -> int:
         torch.save(
             {
                 "model": model.state_dict(),
-                "config": model.config.__dict__,
+                "mode": args.mode,
+                "backbone_kwargs": {
+                    "d_model": args.d_model,
+                    "pretrained": args.pretrained,
+                    "freeze_backbone": args.freeze_backbone,
+                    "extra": extra,
+                },
+                "n_channels": n_channels,
+                "n_classes": len(tokenizer),
                 "vocab": tokenizer.itos,
                 "epoch": epoch,
             },
@@ -397,18 +471,25 @@ def cmd_train(args: argparse.Namespace) -> int:
 def cmd_evaluate(args: argparse.Namespace) -> int:
     import torch
 
+    from bci_eeg_to_text.backbones import build_ctc_model
     from bci_eeg_to_text.decode import (
         beam_search_decode,
         character_error_rate,
         sentence_accuracy,
     )
-    from bci_eeg_to_text.model import EEGToTextCTC, ModelConfig
     from bci_eeg_to_text.train import evaluate, make_batches, move_batch_to_device, resolve_device
 
     device = resolve_device(args.device)
-    dataset, tokenizer, _ = _load_dataset(Path(args.cache), args.n_samples)
+    dataset, tokenizer, n_channels = _load_dataset(Path(args.cache), args.n_samples)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    model = EEGToTextCTC(ModelConfig(**checkpoint["config"])).to(device)
+    # Rebuild exactly the architecture that was trained; the mode and backbone
+    # options are stored in the checkpoint for this reason.
+    model = build_ctc_model(
+        checkpoint.get("mode", "scratch"),
+        n_channels=int(checkpoint.get("n_channels", n_channels)),
+        n_classes=int(checkpoint.get("n_classes", len(tokenizer))),
+        **checkpoint.get("backbone_kwargs", {"d_model": 256}),
+    ).to(device)
     model.load_state_dict(checkpoint["model"])
 
     batches = make_batches([dataset[i] for i in range(len(dataset))], 8)
