@@ -227,3 +227,6 @@ coverage.xml
 junit.xml
 htmlcov/
 .coverage
+
+# Materialised split trees (symlinks, regenerable)
+splits/

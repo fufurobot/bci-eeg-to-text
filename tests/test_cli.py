@@ -47,10 +47,33 @@ class TestParser:
         with pytest.raises(SystemExit):
             parser.parse_args([command, "--help"])
 
-    def test_default_data_root_is_the_dataset_parent(self) -> None:
-        """Both datasets live under one parent, selected by --dataset."""
+    def test_data_root_defaults_to_the_environment(self) -> None:
+        """Nothing about the dataset layout is hard-coded in the parser.
+
+        The flag defaults to None so DataConfig can fall back to
+        EEG_TEXT_BCI_DATA_ROOT and then a built-in default.
+        """
         args = build_parser().parse_args(["prepare", "--out", "x"])
-        assert args.data_root == "eeg-text-bci-data/bci-eeg"
+        assert args.data_root is None
+        assert args.data_subdir is None
+        assert args.data_writable is None
+
+    def test_data_location_flags_are_available(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "prepare",
+                "--out",
+                "x",
+                "--data-root",
+                "/data",
+                "--data-subdir",
+                "corpora",
+                "--data-writable",
+            ]
+        )
+        assert args.data_root == "/data"
+        assert args.data_subdir == "corpora"
+        assert args.data_writable is True
 
     def test_dataset_defaults_to_chisco(self) -> None:
         args = build_parser().parse_args(["prepare", "--out", "x"])
@@ -351,6 +374,20 @@ class TestEndToEndOnSyntheticCache:
 class TestSplitCommand:
     """The split command must expose the agreed, gender-balanced policy."""
 
+    @pytest.fixture(autouse=True)
+    def scratch_cwd(self, tmp_path, monkeypatch):
+        """Run in a scratch directory: --link writes a symlink tree.
+
+        The dataset is re-pointed with an absolute path because the default is
+        relative to the repository, which is no longer the working directory.
+        """
+        repo = Path(__file__).resolve().parents[1]
+        data = repo / "eeg-text-bci-data" / "bci-eeg"
+        monkeypatch.chdir(tmp_path)
+        if data.exists():
+            monkeypatch.setenv("EEG_TEXT_BCI_DATA_ROOT", str(repo / "eeg-text-bci-data"))
+        return tmp_path
+
     def test_chisco_uses_one_to_one(self, capsys) -> None:
         code = main(["split", "--dataset", "chisco"])
         if code != 0:
@@ -373,7 +410,9 @@ class TestSplitCommand:
             pytest.skip("dataset not mounted")
         assert "'train': 1, 'test': 1" in capsys.readouterr().out
 
-    def test_run_level_warns_on_stderr(self, capsys) -> None:
+    def test_run_level_warns_on_stderr(self, tmp_path, monkeypatch, capsys) -> None:
+        # Materialising links writes files, so run in a scratch directory.
+        monkeypatch.chdir(tmp_path)
         code = main(["split", "--dataset", "chisco", "--level", "run"])
         if code != 0:
             pytest.skip("dataset not mounted")

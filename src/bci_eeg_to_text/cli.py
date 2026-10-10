@@ -8,16 +8,41 @@ import sys
 from pathlib import Path
 
 from bci_eeg_to_text.backbones import TRAINING_MODES
-
-#: Parent directory holding both datasets as subdirectories.
-DEFAULT_DATA_ROOT = "eeg-text-bci-data/bci-eeg"
+from bci_eeg_to_text.dataconfig import (
+    DATA_ROOT_ENV,
+    DATA_SUBDIR_ENV,
+    DATA_WRITABLE_ENV,
+    DEFAULT_DATA_ROOT,
+    DEFAULT_DATA_SUBDIR,
+    DataConfig,
+)
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
+    """Shared dataset-location options.
+
+    Defaults come from the environment (see :mod:`bci_eeg_to_text.dataconfig`)
+    so nothing about the dataset layout is hard-coded, and an explicit flag
+    always overrides the environment.
+    """
     parser.add_argument(
         "--data-root",
-        default=DEFAULT_DATA_ROOT,
-        help=f"dataset parent directory (default: {DEFAULT_DATA_ROOT})",
+        default=None,
+        help=f"directory containing the corpora (env {DATA_ROOT_ENV}, default {DEFAULT_DATA_ROOT})",
+    )
+    parser.add_argument(
+        "--data-subdir",
+        default=None,
+        help=f"corpus subdirectory (env {DATA_SUBDIR_ENV}, default {DEFAULT_DATA_SUBDIR})",
+    )
+    parser.add_argument(
+        "--data-writable",
+        action="store_true",
+        default=None,
+        help=(
+            "assume the dataset root is writable and create splits inside it; "
+            f"default is to write to the current directory (env {DATA_WRITABLE_ENV})"
+        ),
     )
 
 
@@ -61,7 +86,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="override ratios, e.g. 'train=1,test=1' (default 3:1:1, or 1:1 for chisco)",
     )
-    p_split.add_argument("--out", default=None, help="write the split as JSON here")
+    p_split.add_argument(
+        "--link",
+        action="store_true",
+        help=(
+            "materialise the split as a browsable tree of relative symlinks "
+            "(no data is copied); use --data-writable to place it inside the "
+            "dataset root instead of the current directory"
+        ),
+    )
+    p_split.add_argument(
+        "--no-link", dest="link", action="store_false", help="only print the split"
+    )
+    p_split.set_defaults(link=True)
+    p_split.add_argument("--out", default=None, help="also write the split as JSON here")
 
     p_inspect = sub.add_parser("inspect", help="report an EDF run without extracting")
     _add_common(p_inspect)
@@ -161,11 +199,10 @@ def cmd_split(args: argparse.Namespace) -> int:
     # Validate arguments before touching the filesystem: a malformed --ratios
     # must fail the same way whether or not the dataset happens to be mounted.
     ratios = _parse_ratios(args.ratios, args.dataset)
+    config = _data_config(args)
 
     names = _resolve_dataset_names(args.dataset)
-    sources = [
-        get_source(name, data_root=Path(args.data_root) / _root_suffix(name)) for name in names
-    ]
+    sources = [get_source(name, **_source_kwargs(config, name)) for name in names]
     participants = subjects_for_split(sources)
     if not participants:
         print("no participants found; is the dataset mounted?", file=sys.stderr)
@@ -210,6 +247,33 @@ def cmd_split(args: argparse.Namespace) -> int:
     # say so loudly rather than letting the number be misread.
     for warning in split.warnings:
         print(f"\nWARNING: {warning}", file=sys.stderr)
+
+    if args.link:
+        from bci_eeg_to_text.dataconfig import DataAccessError, materialise_split
+
+        corpus_paths = {
+            source.name: config.dataset_path(_corpus_dirname(source.name)) for source in sources
+        }
+        try:
+            result = materialise_split(
+                split,
+                data=config,
+                corpus_paths=corpus_paths,
+                cwd=Path.cwd(),
+            )
+        except DataAccessError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        where = "inside the dataset root" if config.assume_writable else "in the current directory"
+        print(f"\nlinked split tree {where}: {result.path}")
+        print(f"  {result.n_links} symlinks (relative targets, no data copied)")
+        for part, count in sorted(result.parts.items()):
+            print(f"  {part}: {count}")
+        if result.skipped:
+            print(f"  {len(result.skipped)} entries skipped (no local files)", file=sys.stderr)
+        print(f"  manifest: {result.manifest_path}")
+        print("\nBrowse it with, e.g.:")
+        print(f"  ls -l {result.path}/train | head")
 
     if args.out:
         payload = {
@@ -261,6 +325,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     """Extract (EEG, text) pairs from one or more dataset sources."""
     from bci_eeg_to_text.sources import get_source
 
+    config = _data_config(args)
     names = _resolve_dataset_names(args.dataset)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -268,7 +333,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     manifest: list[dict[str, object]] = []
     skipped: list[tuple[str, str]] = []
     for name in names:
-        source = get_source(name, data_root=Path(args.data_root) / _root_suffix(name))
+        source = get_source(name, **_source_kwargs(config, name))
         print(f"# {source.describe()}", flush=True)
         runs = source.runs()
         if args.subjects:
@@ -332,9 +397,23 @@ def _resolve_dataset_names(value: str) -> list[str]:
     return [value]
 
 
-def _root_suffix(name: str) -> str:
-    """Subdirectory of the shared data root holding a given dataset."""
+def _corpus_dirname(name: str) -> str:
+    """OpenNeuro directory name for a registered source."""
     return {"chisco": "ds005170", "chineseeeg": "ds004952"}.get(name, name)
+
+
+def _data_config(args: argparse.Namespace) -> DataConfig:
+    """Resolve the dataset location from CLI flags and the environment."""
+    return DataConfig.from_env(
+        root=getattr(args, "data_root", None),
+        subdir=getattr(args, "data_subdir", None),
+        assume_writable=getattr(args, "data_writable", None),
+    )
+
+
+def _source_kwargs(config: DataConfig, name: str) -> dict[str, object]:
+    """Keyword arguments needed to build a source for ``name``."""
+    return {"data_root": config.dataset_path(_corpus_dirname(name))}
 
 
 def _load_dataset(cache_dir: Path, n_samples: int):
