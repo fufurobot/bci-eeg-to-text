@@ -317,3 +317,80 @@ class TestReadOnlyRoot:
             split, data=config, corpus_paths={"bci-eeg": corpus}, cwd=workspace
         )
         assert workspace in result.path.parents
+
+
+class TestTextCompanions:
+    """Recordings are symlinked, but the text describing the pairing is copied.
+
+    The recordings are gigabytes; the text is kilobytes. Copying the text makes
+    the EEG-to-text pairing inspectable with `ls` instead of leaving a reader to
+    re-derive which stimulus belongs to which recording.
+    """
+
+    def test_copies_dataset_level_text(self, tmp_path: Path) -> None:
+        from bci_eeg_to_text.dataconfig import copy_text_companions
+
+        corpus = tmp_path / "corpus"
+        (corpus / "json").mkdir(parents=True)
+        (corpus / "participants.tsv").write_text("participant_id\tsex\nsub-01\tF\n")
+        (corpus / "json" / "textmaps.json").write_text('{"a": 1}')
+
+        dest = tmp_path / "dest"
+        copied = copy_text_companions(dest, corpus, "sub-01")
+        assert copied == 2
+        assert (dest / "participants.tsv").exists()
+        assert (dest / "textmaps.json").exists()
+
+    def test_never_copies_large_files(self, tmp_path: Path) -> None:
+        """A recording must not be duplicated by the text pass."""
+        from bci_eeg_to_text.dataconfig import copy_text_companions
+
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        (corpus / "participants.tsv").write_text("x")
+        (corpus / "huge.json").write_bytes(b"x" * (3 * 1024 * 1024))
+
+        dest = tmp_path / "dest"
+        copy_text_companions(dest, corpus, "sub-01")
+        assert not (dest / "huge.json").exists()
+
+    def test_copied_files_are_real_not_links(self, tmp_path: Path) -> None:
+        from bci_eeg_to_text.dataconfig import copy_text_companions
+
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        (corpus / "participants.tsv").write_text("x")
+        dest = tmp_path / "dest"
+        copy_text_companions(dest, corpus, "sub-01")
+        assert not (dest / "participants.tsv").is_symlink()
+
+    def test_text_dir_is_a_sibling_not_inside_the_link(self, tmp_path: Path) -> None:
+        """Writing through the link would try to write into the dataset."""
+        from bci_eeg_to_text.dataconfig import DataConfig, materialise_split
+        from bci_eeg_to_text.splits import make_splits
+
+        corpus = make_corpus(tmp_path, ["sub-01"])
+        (corpus.parent / "participants.tsv").write_text("participant_id\tsex\nsub-01\tF\n")
+        config = DataConfig(root=tmp_path, assume_writable=True)
+        split = make_splits([Participant("sub-01", sex="F")], ratios={"train": 1})
+        result = materialise_split(split, data=config, corpus_paths={"bci-eeg": corpus})
+
+        link = result.path / "train" / "sub-01"
+        text_dir = result.path / "train" / "sub-01.text"
+        assert link.is_symlink()
+        assert text_dir.is_dir() and not text_dir.is_symlink()
+        assert result.n_text_copies > 0
+        # The dataset itself must be untouched.
+        assert not (corpus / "sub-01" / "participants.tsv").exists()
+
+    def test_can_be_disabled(self, tmp_path: Path) -> None:
+        from bci_eeg_to_text.dataconfig import DataConfig, materialise_split
+        from bci_eeg_to_text.splits import make_splits
+
+        corpus = make_corpus(tmp_path, ["sub-01"])
+        config = DataConfig(root=tmp_path, assume_writable=True)
+        split = make_splits([Participant("sub-01", sex="F")], ratios={"train": 1})
+        result = materialise_split(
+            split, data=config, corpus_paths={"bci-eeg": corpus}, copy_text=False
+        )
+        assert result.n_text_copies == 0

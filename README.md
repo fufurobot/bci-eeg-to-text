@@ -83,6 +83,46 @@ so the tree still resolves after the dataset and split move together.
 
 A `split.json` manifest is written alongside the tree for tooling.
 
+### Text leakage modes
+
+Disjoint recordings are not enough: two parts can share the *text* that was
+read, and a model can memorise prose instead of learning to decode EEG.
+
+```bash
+uv run bci-eeg-to-text split --dataset chineseeeg --leakage article
+```
+
+| mode | guarantee |
+| --- | --- |
+| `none` | nothing enforced; an upper bound |
+| `row` | no identical row in two parts (**default**) |
+| `paragraph` | no paragraph in two parts |
+| `article` | no chapter in two parts (strictest) |
+
+This is possible because rows are **verbatim substrings of the source novels**,
+so each row's position is found by string search and its paragraph and chapter
+follow from that offset. Measured on the real corpus, **99.7% of rows (12,075 of
+12,115)** resolve to a paragraph and an article; the 40 that do not fall back to
+row identity and so can never match a stricter check by accident. The command
+prints this coverage, so weak structure is visible rather than assumed.
+
+Groups are indivisible: rows of one paragraph travel together, because splitting
+them would put half a paragraph in train and half in test — exactly the leak the
+stricter modes exist to prevent.
+
+### The split tree is readable
+
+Recordings are symlinked (they are gigabytes) while the small text that says
+what was read is **copied** beside them (it is kilobytes):
+
+```
+splits/train/sub-04         -> symlink: the recordings, 0 bytes
+splits/train/sub-04.text/   -> copied participants.tsv, textmaps.json, 260 KB
+```
+
+So `ls` shows the EEG-to-text pairing directly instead of leaving you to decode
+a manifest. `--no-text-copy` disables it.
+
 ### Data location is configuration
 
 | setting | env | default | meaning |
@@ -123,6 +163,8 @@ split_data_N.xlsx ──────────┘
 | --- | --- |
 | `dataconfig.py` | dataset location resolution, symlinked split materialisation |
 | `splittree.py` | reading split trees; leakage detection |
+| `leakage.py` | text leakage modes over rows, paragraphs and articles |
+| `textstructure.py` | recovering row/paragraph/article identity from source novels |
 | `splitdata.py` | turning a split tree into training datasets |
 | `backbones.py` | interchangeable encoders (`scratch`, `bert-ctc`, NeuroLM modes) |
 | `neurolm.py` | loading NeuroLM components and checkpoints |
