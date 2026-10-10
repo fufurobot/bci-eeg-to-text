@@ -45,9 +45,24 @@ class TestParser:
         with pytest.raises(SystemExit):
             parser.parse_args([command, "--help"])
 
-    def test_default_data_root_is_the_mount(self) -> None:
+    def test_default_data_root_is_the_dataset_parent(self) -> None:
+        """Both datasets live under one parent, selected by --dataset."""
         args = build_parser().parse_args(["prepare", "--out", "x"])
-        assert args.data_root == "eeg-text-bci-data/bci-eeg/ds005170"
+        assert args.data_root == "eeg-text-bci-data/bci-eeg"
+
+    def test_dataset_defaults_to_chisco(self) -> None:
+        args = build_parser().parse_args(["prepare", "--out", "x"])
+        assert args.dataset == "chisco"
+
+    def test_dataset_choices_include_merged(self) -> None:
+        for choice in ("chisco", "chineseeeg", "merged"):
+            args = build_parser().parse_args(["prepare", "--out", "x", "--dataset", choice])
+            assert args.dataset == choice
+
+    def test_split_defaults_to_subject_level(self) -> None:
+        """Run-level splitting must be opt-in, never the default."""
+        args = build_parser().parse_args(["split"])
+        assert args.level == "subject"
 
     def test_decimate_defaults_to_downsampling(self) -> None:
         args = build_parser().parse_args(["prepare", "--out", "x"])
@@ -72,10 +87,15 @@ class TestInspect:
 
 
 class TestPrepareErrors:
-    def test_no_runs_reports_failure(self, tmp_path: Path, capsys) -> None:
+    def test_no_runs_reports_cleanly(self, tmp_path: Path, capsys) -> None:
+        """An empty data root must not crash; it reports and returns 0.
+
+        Missing data is an expected condition (the corpus is partially
+        downloaded by design), so this is not treated as a hard failure.
+        """
         code = main(["prepare", "--data-root", str(tmp_path), "--out", str(tmp_path / "o")])
-        assert code == 1
-        assert "no EDF runs found" in capsys.readouterr().err
+        assert code == 0
+        assert "no usable runs" in capsys.readouterr().err
 
 
 class TestTrainAndEvaluateRequireCache:
@@ -319,3 +339,57 @@ class TestEndToEndOnSyntheticCache:
         end = out_text.index("}", start) + 1
         payload = json.loads(out_text[start:end])
         assert set(payload) >= {"loss", "cer", "sentence_accuracy", "n_examples"}
+
+
+class TestSplitCommand:
+    """The split command must expose the agreed, gender-balanced policy."""
+
+    def test_chisco_uses_one_to_one(self, capsys) -> None:
+        code = main(["split", "--dataset", "chisco"])
+        if code != 0:
+            pytest.skip("dataset not mounted")
+        out = capsys.readouterr().out
+        assert "'train': 1, 'test': 1" in out
+        assert "1F/1M" in out
+
+    def test_chineseeeg_uses_three_one_one(self, capsys) -> None:
+        code = main(["split", "--dataset", "chineseeeg"])
+        if code != 0:
+            pytest.skip("dataset not mounted")
+        out = capsys.readouterr().out
+        assert "'train': 3, 'valid': 1, 'test': 1" in out
+        assert "3F/3M" in out
+
+    def test_ratios_can_be_overridden(self, capsys) -> None:
+        code = main(["split", "--dataset", "chineseeeg", "--ratios", "train=1,test=1"])
+        if code != 0:
+            pytest.skip("dataset not mounted")
+        assert "'train': 1, 'test': 1" in capsys.readouterr().out
+
+    def test_run_level_warns_on_stderr(self, capsys) -> None:
+        code = main(["split", "--dataset", "chisco", "--level", "run"])
+        if code != 0:
+            pytest.skip("dataset not mounted")
+        err = capsys.readouterr().err
+        assert "NOT a cross-subject estimate" in err
+
+    def test_subject_level_does_not_warn(self, capsys) -> None:
+        code = main(["split", "--dataset", "chisco"])
+        if code != 0:
+            pytest.skip("dataset not mounted")
+        assert "NOT a cross-subject" not in capsys.readouterr().err
+
+    def test_writes_json_when_asked(self, tmp_path, capsys) -> None:
+        out = tmp_path / "split.json"
+        code = main(["split", "--dataset", "chisco", "--out", str(out)])
+        if code != 0:
+            pytest.skip("dataset not mounted")
+        pytest.importorskip("json")
+        payload = json.loads(out.read_text())
+        assert payload["level"] == "subject"
+        assert payload["subject_level"] is True
+        assert set(payload["parts"]) == {"train", "test"}
+
+    def test_rejects_malformed_ratios(self) -> None:
+        with pytest.raises(SystemExit, match="expected name=int"):
+            main(["split", "--dataset", "chisco", "--ratios", "bogus"])

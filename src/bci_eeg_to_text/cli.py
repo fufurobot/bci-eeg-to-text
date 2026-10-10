@@ -7,30 +7,59 @@ import json
 import sys
 from pathlib import Path
 
-DEFAULT_DATA_ROOT = "eeg-text-bci-data/bci-eeg/ds005170"
+#: Parent directory holding both datasets as subdirectories.
+DEFAULT_DATA_ROOT = "eeg-text-bci-data/bci-eeg"
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--data-root",
         default=DEFAULT_DATA_ROOT,
-        help=f"Chisco dataset root (default: {DEFAULT_DATA_ROOT})",
+        help=f"dataset parent directory (default: {DEFAULT_DATA_ROOT})",
     )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bci-eeg-to-text",
-        description="CTC-based EEG-to-text decoding on the Chisco dataset",
+        description="CTC-based EEG-to-text decoding over EEG-text datasets",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_prepare = sub.add_parser("prepare", help="extract aligned trials into a cache")
     _add_common(p_prepare)
+    p_prepare.add_argument(
+        "--dataset",
+        default="chisco",
+        choices=["chisco", "chineseeeg", "merged"],
+        help="which corpus to read (merged reads both)",
+    )
     p_prepare.add_argument("--out", required=True, help="output cache directory")
     p_prepare.add_argument("--decimate", type=int, default=8, help="downsample factor")
     p_prepare.add_argument("--limit", type=int, default=None, help="only process N runs")
     p_prepare.add_argument("--subjects", nargs="*", default=None, help="restrict to these subjects")
+
+    p_split = sub.add_parser("split", help="show train/valid/test subject splits")
+    _add_common(p_split)
+    p_split.add_argument(
+        "--dataset",
+        default="merged",
+        choices=["chisco", "chineseeeg", "merged"],
+        help="which corpus(s) to split",
+    )
+    p_split.add_argument(
+        "--level",
+        default="subject",
+        choices=["subject", "run"],
+        help="split by participant (default) or by run (within-participant)",
+    )
+    p_split.add_argument("--seed", type=int, default=0)
+    p_split.add_argument(
+        "--ratios",
+        default=None,
+        help="override ratios, e.g. 'train=1,test=1' (default 3:1:1, or 1:1 for chisco)",
+    )
+    p_split.add_argument("--out", default=None, help="write the split as JSON here")
 
     p_inspect = sub.add_parser("inspect", help="report an EDF run without extracting")
     _add_common(p_inspect)
@@ -58,6 +87,102 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--n-samples", type=int, default=8000)
     p_eval.add_argument("--beam-width", type=int, default=1, help="1 means greedy")
     return parser
+
+
+def _default_ratios(dataset: str) -> dict[str, int]:
+    """Agreed split ratios per dataset.
+
+    ds004952 has 10 subjects, enough for a held-out validation set; ds005170 has
+    only 4 usable subjects, so it is split 1:1 train/test.
+    """
+    if dataset == "chisco":
+        return {"train": 1, "test": 1}
+    return {"train": 3, "valid": 1, "test": 1}
+
+
+def _parse_ratios(spec: str | None, dataset: str) -> dict[str, int]:
+    if not spec:
+        return _default_ratios(dataset)
+    ratios: dict[str, int] = {}
+    for chunk in spec.split(","):
+        if "=" not in chunk:
+            raise SystemExit(f"bad --ratios entry {chunk!r}; expected name=int")
+        key, _, value = chunk.partition("=")
+        ratios[key.strip()] = int(value)
+    return ratios
+
+
+def cmd_split(args: argparse.Namespace) -> int:
+    """Show (and optionally persist) a gender-balanced subject-level split."""
+    from bci_eeg_to_text.sources import get_source, subjects_for_split
+    from bci_eeg_to_text.splits import make_splits, validate_subject_disjoint
+
+    names = _resolve_dataset_names(args.dataset)
+    sources = [
+        get_source(name, data_root=Path(args.data_root) / _root_suffix(name)) for name in names
+    ]
+    participants = subjects_for_split(sources)
+    if not participants:
+        print("no participants found; is the dataset mounted?", file=sys.stderr)
+        return 1
+
+    ratios = _parse_ratios(args.ratios, args.dataset)
+    runs_per_subject = None
+    if args.level == "run":
+        runs_per_subject = {}
+        for source in sources:
+            for run in source.runs():
+                key = f"{source.name}:{run.subject_id}"
+                runs_per_subject.setdefault(key, []).append(run.run)
+
+    split = make_splits(
+        participants,
+        ratios=ratios,
+        level=args.level,
+        seed=args.seed,
+        runs_per_subject=runs_per_subject,
+    )
+    validate_subject_disjoint(split, participants)
+
+    by_id = {p.subject_id: p for p in participants}
+    print(f"dataset: {args.dataset}  level: {args.level}  ratios: {ratios}  seed: {args.seed}")
+    for part, entries in split.parts.items():
+        # At run level the entries are "subject/run"; keep subject and run
+        # distinct so the shared participant always comes from the entry.
+        subject_of = {e: (e.split("/")[0] if "/" in e else e) for e in entries}
+        for subject in subject_of.values():
+            if subject not in by_id:
+                raise SystemExit(f"split referenced unknown subject {subject!r}")
+        sexes = [by_id[subject_of[e]].sex or "?" for e in entries]
+        unit = "runs" if not split.subject_level else "subjects"
+        summary = f"{sexes.count('F')}F/{sexes.count('M')}M"
+        print(f"\n{part} ({len(entries)} {unit}, {summary}):")
+        for entry in entries:
+            subject = subject_of[entry]
+            label = entry if not split.subject_level else subject
+            print(f"  {label} ({by_id[subject].sex or 'sex unknown'})")
+
+    # A run-level split is legitimate but is not a generalisation estimate, so
+    # say so loudly rather than letting the number be misread.
+    for warning in split.warnings:
+        print(f"\nWARNING: {warning}", file=sys.stderr)
+
+    if args.out:
+        payload = {
+            "dataset": args.dataset,
+            "level": args.level,
+            "seed": args.seed,
+            "ratios": ratios,
+            "subject_level": split.subject_level,
+            "warnings": list(split.warnings),
+            "parts": {k: list(v) for k, v in split.parts.items()},
+        }
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        print(f"\nwrote {args.out}")
+    return 0
 
 
 def cmd_inspect(args: argparse.ArgumentParser) -> int:
@@ -89,41 +214,83 @@ def cmd_inspect(args: argparse.ArgumentParser) -> int:
 
 
 def cmd_prepare(args: argparse.Namespace) -> int:
-    from bci_eeg_to_text.data import ExtractConfig, discover_runs, extract_run
+    """Extract (EEG, text) pairs from one or more dataset sources."""
+    from bci_eeg_to_text.sources import get_source
 
+    names = _resolve_dataset_names(args.dataset)
     out_dir = Path(args.out)
-    runs = discover_runs(args.data_root)
-    if args.subjects:
-        wanted = set(args.subjects)
-        runs = [r for r in runs if any(f"/{s}/" in str(r) for s in wanted)]
-    if args.limit:
-        runs = runs[: args.limit]
-    if not runs:
-        print(f"no EDF runs found under {args.data_root}", file=sys.stderr)
-        return 1
-
     out_dir.mkdir(parents=True, exist_ok=True)
-    manifest = []
-    for i, run in enumerate(runs, 1):
-        # Name the cache after the run alone; run indices are globally unique,
-        # so including the session would just duplicate information.
-        cache = out_dir / f"{run.stem}.npz"
-        if cache.exists():
-            print(f"[{i}/{len(runs)}] cached {cache.name}")
+
+    manifest: list[dict[str, object]] = []
+    skipped: list[tuple[str, str]] = []
+    for name in names:
+        source = get_source(name, data_root=Path(args.data_root) / _root_suffix(name))
+        print(f"# {source.describe()}", flush=True)
+        runs = source.runs()
+        if args.subjects:
+            wanted = set(args.subjects)
+            runs = [r for r in runs if r.subject_id in wanted]
+        if args.limit:
+            runs = runs[: args.limit]
+        if not runs:
+            print(f"  no usable runs for {name}", file=sys.stderr)
             continue
-        info = extract_run(run, args.data_root, cache, config=ExtractConfig(decimate=args.decimate))
-        manifest.append(info)
-        print(
-            f"[{i}/{len(runs)}] {info['subject']} run {info['run']}: "
-            f"{info['n_trials']} trials -> {cache.name}",
-            flush=True,
-        )
+
+        for i, run in enumerate(runs, 1):
+            label = f"{name}_{run.subject_id}_{run.session or 'na'}_{run.run}"
+            cache = out_dir / f"{label}.npz"
+            if cache.exists():
+                print(f"[{i}/{len(runs)}] cached {cache.name}", flush=True)
+                continue
+            try:
+                report = source.extract(run, cache, decimate=args.decimate)
+            except Exception as exc:  # noqa: BLE001 - report and continue the sweep
+                skipped.append((f"{name}:{run.subject_id}/{run.run}", str(exc)))
+                print(f"[{i}/{len(runs)}] SKIP {run.subject_id} {run.run}: {exc}", flush=True)
+                continue
+            if not report.ok:
+                reason = report.skipped_reason or "unknown"
+                skipped.append((f"{name}:{run.subject_id}/{run.run}", reason))
+                print(f"[{i}/{len(runs)}] SKIP {run.subject_id} {run.run}: {reason}", flush=True)
+                continue
+            manifest.append(
+                {
+                    "dataset": name,
+                    "subject": run.subject_id,
+                    "run": run.run,
+                    "session": run.session,
+                    "n_segments": report.n_segments,
+                    **report.details,
+                }
+            )
+            print(
+                f"[{i}/{len(runs)}] {run.subject_id} {run.run}: "
+                f"{report.n_segments} segments -> {cache.name}",
+                flush=True,
+            )
 
     (out_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    print(f"wrote {len(manifest)} new caches to {out_dir}")
+    print(f"wrote {len(manifest)} caches to {out_dir}")
+    if skipped:
+        print(f"skipped {len(skipped)} runs; details in skipped.json", file=sys.stderr)
+        (out_dir / "skipped.json").write_text(
+            json.dumps(skipped, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
     return 0
+
+
+def _resolve_dataset_names(value: str) -> list[str]:
+    """Turn ``--dataset`` into concrete source names."""
+    if value == "merged":
+        return ["chisco", "chineseeeg"]
+    return [value]
+
+
+def _root_suffix(name: str) -> str:
+    """Subdirectory of the shared data root holding a given dataset."""
+    return {"chisco": "ds005170", "chineseeeg": "ds004952"}.get(name, name)
 
 
 def _load_dataset(cache_dir: Path, n_samples: int):
@@ -291,6 +458,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     handlers = {
         "prepare": cmd_prepare,
+        "split": cmd_split,
         "train": cmd_train,
         "evaluate": cmd_evaluate,
         "inspect": cmd_inspect,
