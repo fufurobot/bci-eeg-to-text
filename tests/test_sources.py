@@ -173,3 +173,139 @@ class TestRealSources:
         assert len(participants) == 10
         assert sum(1 for p in participants if p.sex == "F") == 5
         assert sum(1 for p in participants if p.sex == "M") == 5
+
+
+class TestChineseEEGAlignment:
+    """Guards for the ChineseEEG row-to-text mapping.
+
+    Row boundaries come from ROWS/ROWE markers, and a row's duration is its
+    character count times 0.35 s. Both facts are asserted here because getting
+    them wrong produces confidently mislabelled training data.
+    """
+
+    def test_chapter_banners_are_kept_as_rows(self, tmp_path: Path) -> None:
+        """Numeric chapter banners are displayed, so they occupy a row.
+
+        Dropping them desynchronises every later row.
+        """
+        import zipfile
+
+        from bci_eeg_to_text.chineseeeg import read_segmented_novel
+
+        sheet = (
+            "<worksheet><sheetData>"
+            '<row r="1"><c t="inlineStr"><is><t>Chinese_text</t></is></c></row>'
+            '<row r="2"><c t="inlineStr"><is><t>1</t></is></c></row>'
+            '<row r="3"><c t="inlineStr"><is><t>我六岁那年</t></is></c></row>'
+            "</sheetData></worksheet>"
+        )
+        path = tmp_path / "segmented_run_1.xlsx"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("xl/worksheets/sheet1.xml", sheet)
+        assert read_segmented_novel(path) == ["1", "我六岁那年"]
+
+    def test_blank_rows_are_dropped(self, tmp_path: Path) -> None:
+        import zipfile
+
+        from bci_eeg_to_text.chineseeeg import read_segmented_novel
+
+        sheet = (
+            "<worksheet><sheetData>"
+            '<row r="1"><c t="inlineStr"><is><t>Chinese_text</t></is></c></row>'
+            '<row r="2"></row>'
+            '<row r="3"><c t="inlineStr"><is><t>好</t></is></c></row>'
+            "</sheetData></worksheet>"
+        )
+        path = tmp_path / "s.xlsx"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("xl/worksheets/sheet1.xml", sheet)
+        assert read_segmented_novel(path) == ["好"]
+
+    def test_correlation_is_high_when_duration_tracks_length(self) -> None:
+        from bci_eeg_to_text.chineseeeg import duration_length_correlation
+
+        rate = 256.0
+        texts = ["a" * n for n in (2, 4, 6, 8, 10, 12, 14, 16)]
+        intervals = []
+        cursor = 0
+        for text in texts:
+            stop = cursor + int(len(text) * 0.35 * rate)
+            intervals.append((cursor, stop))
+            cursor = stop
+        assert duration_length_correlation(intervals, texts, rate) > 0.99
+
+    def test_correlation_is_negative_when_intervals_are_inverted(self) -> None:
+        """The signature of the corrupt run: shorter text, longer interval."""
+        from bci_eeg_to_text.chineseeeg import duration_length_correlation
+
+        rate = 256.0
+        texts = ["a" * n for n in (2, 4, 6, 8, 10, 12, 14, 16)]
+        intervals = []
+        cursor = 0
+        for text in reversed(texts):
+            stop = cursor + int(len(text) * 0.35 * rate)
+            intervals.append((cursor, stop))
+            cursor = stop
+        assert duration_length_correlation(intervals, texts, rate) < 0
+
+    def test_correlation_returns_none_for_tiny_inputs(self) -> None:
+        from bci_eeg_to_text.chineseeeg import duration_length_correlation
+
+        assert duration_length_correlation([(0, 10)], ["ab"], 256.0) is None
+
+    def test_correlation_returns_none_without_variance(self) -> None:
+        from bci_eeg_to_text.chineseeeg import duration_length_correlation
+
+        intervals = [(i * 100, i * 100 + 50) for i in range(10)]
+        assert duration_length_correlation(intervals, ["ab"] * 10, 256.0) is None
+
+    def test_row_intervals_pairs_rows_with_the_next_rowe(self) -> None:
+        from bci_eeg_to_text.chineseeeg import Event, row_intervals
+
+        events = [
+            Event(0.0, 0.0, "ROWS", 0),
+            Event(1.0, 0.0, "ROWE", 256),
+            Event(1.1, 0.0, "ROWS", 280),
+            Event(2.1, 0.0, "ROWE", 540),
+        ]
+        assert row_intervals(events) == [(0, 256), (280, 540)]
+
+    def test_row_intervals_raises_on_unbalanced_markers(self) -> None:
+        """An unclosed ROWS would shift every later row's text."""
+        from bci_eeg_to_text.chineseeeg import Event, row_intervals
+
+        events = [Event(0.0, 0.0, "ROWS", 0), Event(1.0, 0.0, "ROWE", 256)]
+        events.append(Event(2.0, 0.0, "ROWS", 600))
+        with pytest.raises(Exception, match="no following ROWE|unbalanced"):
+            row_intervals(events)
+
+
+@pytest.mark.realdata
+class TestChineseEEGRealAlignment:
+    def test_healthy_runs_match_exactly_with_high_correlation(self) -> None:
+        """Runs whose counts agree must also show duration proportional to length."""
+        from bci_eeg_to_text.chineseeeg import (
+            MIN_DURATION_LENGTH_CORRELATION,
+            duration_length_correlation,
+            read_events,
+            read_segmented_novel,
+            row_intervals,
+        )
+        from bci_eeg_to_text.sources import get_source
+
+        source = get_source("chineseeeg")
+        if not source.root().exists():
+            pytest.skip("dataset not mounted")
+        runs = [
+            r for r in source.runs() if r.subject_id == "sub-04" and r.run in {"run-02", "run-03"}
+        ]
+        assert runs, "expected sub-04 runs to exist"
+        for run in runs:
+            paths = [p for p in source.novel_paths(run) if "_display" not in p.name]
+            if not paths:
+                continue
+            texts = read_segmented_novel(paths[0])
+            intervals = row_intervals(read_events(source.events_path(run)))
+            assert len(intervals) == len(texts)
+            corr = duration_length_correlation(intervals, texts, 256.0)
+            assert corr >= MIN_DURATION_LENGTH_CORRELATION, f"{run.run}: corr={corr}"

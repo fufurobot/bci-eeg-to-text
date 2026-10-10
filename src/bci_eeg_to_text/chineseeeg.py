@@ -55,6 +55,11 @@ from bci_eeg_to_text.tokenizer import normalize_text
 #: Seconds each character is highlighted during presentation.
 CHARACTER_DURATION_S = 0.35
 
+#: Minimum acceptable correlation between row duration and row length.
+#: Correctly aligned runs measure +0.87..+0.90; the known-bad run measures
+#: -0.135, so any threshold in between separates them cleanly.
+MIN_DURATION_LENGTH_CORRELATION = 0.5
+
 #: Preprocessed variants shipped by the dataset, most-filtered last.
 PREPROC_VARIANTS = ("filtered_0.5_80", "filtered_0.5_30")
 
@@ -95,6 +100,37 @@ def read_events(path: str | Path) -> list[Event]:
     return events
 
 
+def duration_length_correlation(
+    intervals: list[tuple[int, int]],
+    texts: list[str],
+    sample_rate: float,
+) -> float | None:
+    """Correlation between row duration and row character count.
+
+    A correctly aligned corpus gives a strong positive correlation, because a
+    row is displayed for its character count times
+    :data:`CHARACTER_DURATION_S`. A value near zero or negative means the row
+    boundaries do not correspond to the text rows.
+
+    Returns ``None`` when there is too little data or no variance to judge.
+    """
+    n = min(len(intervals), len(texts))
+    if n < 8 or sample_rate <= 0:
+        return None
+    durations = [(stop - start) / sample_rate for start, stop in intervals[:n]]
+    lengths = [float(len(t)) for t in texts[:n]]
+    mean_d = sum(durations) / n
+    mean_l = sum(lengths) / n
+    cov = sum(
+        (d - mean_d) * (length - mean_l) for d, length in zip(durations, lengths, strict=True)
+    )
+    var_d = sum((d - mean_d) ** 2 for d in durations)
+    var_l = sum((length - mean_l) ** 2 for length in lengths)
+    if var_d <= 0 or var_l <= 0:
+        return None
+    return cov / (var_d**0.5 * var_l**0.5)
+
+
 def row_intervals(events: list[Event]) -> list[tuple[int, int]]:
     """Turn ``ROWS``/``ROWE`` markers into ``(start_sample, stop_sample)`` pairs.
 
@@ -122,24 +158,29 @@ def row_intervals(events: list[Event]) -> list[tuple[int, int]]:
 
 
 def read_segmented_novel(path: str | Path) -> list[str]:
-    """Read the displayed text lines of a ``segmented_*_run_N.xlsx`` workbook.
+    """Read the displayed text rows of a ``segmented_*_run_N.xlsx`` workbook.
 
-    These workbooks hold a single column: a header, numeric cells marking
-    chapter positions, and one cell per displayed text line.
+    These workbooks hold a single column: a header followed by one cell per
+    displayed row. Numeric cells are chapter banners and are **kept**: they are
+    rendered on screen and therefore occupy a ``ROWS``/``ROWE`` interval like any
+    other row.
+
+    Evidence that banners must be kept (``sub-04`` ses-LittlePrince run 2):
+    including them gives 383 rows for 383 intervals with a duration/length
+    correlation of +0.895, whereas dropping them gives 379 rows and collapses
+    the correlation to +0.003.
     """
     with zipfile.ZipFile(path) as archive:
         sheet = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
 
+    rows = _TEXT_ROW_RE.findall(sheet)[1:]  # drop the header row
     texts: list[str] = []
-    for row_xml in _TEXT_ROW_RE.findall(sheet):
+    for row_xml in rows:
         cells = [unescape(c) for c in _INLINE_RE.findall(row_xml)]
         if not cells:
             continue
         cell = cells[0].strip()
         if not cell:
-            continue
-        # Numeric cells are chapter indices, not readable text.
-        if cell.isdigit():
             continue
         texts.append(normalize_text(cell))
     return texts
@@ -156,9 +197,15 @@ class ChineseEEGSource:
     variant: str = PREPROC_VARIANTS[0]
     #: Downsample factor applied to the 256 Hz signal when caching.
     decimate: int = 4
+    #: Sampling rate of the preprocessed data; used for duration checks.
+    sample_rate_hz: float = 256.0
 
     def root(self) -> Path:
         return Path(self.data_root)
+
+    def sample_rate(self) -> float:
+        """Sampling rate of the preprocessed recordings, in Hz."""
+        return float(self.sample_rate_hz)
 
     def preproc_root(self) -> Path:
         """Directory holding the preprocessed variant actually present."""
@@ -228,6 +275,22 @@ class ChineseEEGSource:
                 f"{run.subject_id} {run.session} {run.run}: {len(intervals)} ROWS/ROWE "
                 f"intervals but {len(texts)} text lines. Naive row-to-text zipping is "
                 "NOT safe for this dataset; the mapping must be resolved first "
+                "(see issue #4)."
+            )
+
+        # Counts agreeing is necessary but NOT sufficient. Run 1 of
+        # ses-LittlePrince has an extra ROWE and an orphaned pre-ROWS marker, so
+        # its boundaries are shifted relative to the text: durations end up
+        # ANTI-correlated with line length instead of proportional to it. That
+        # would produce confidently mislabelled training data, so verify the
+        # timing relationship whenever counts happen to match.
+        correlation = duration_length_correlation(intervals, texts, self.sample_rate())
+        if correlation is not None and correlation < MIN_DURATION_LENGTH_CORRELATION:
+            raise AlignmentError(
+                f"{run.subject_id} {run.session} {run.run}: row durations correlate "
+                f"{correlation:+.3f} with text length, but should be close to +1 "
+                f"(minimum {MIN_DURATION_LENGTH_CORRELATION}). The ROWS/ROWE boundaries "
+                "are misaligned with the text rows; refusing to emit mislabelled pairs "
                 "(see issue #4)."
             )
 
