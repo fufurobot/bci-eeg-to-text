@@ -106,7 +106,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_inspect.add_argument("edf", help="path to an EDF file")
 
     p_train = sub.add_parser("train", help="train the CTC model")
-    p_train.add_argument("--cache", required=True, help="cache directory from prepare")
+    p_train.add_argument(
+        "--split",
+        default=None,
+        help=(
+            "path to a materialised split tree (from `split --link`). "
+            "Preferred: the split defines train/valid/test, so subject-level "
+            "and run-level splits both work and nothing leaks across parts."
+        ),
+    )
+    p_train.add_argument(
+        "--cache",
+        default=None,
+        help=(
+            "directory of pre-extracted .npz trials. Only for quick experiments: "
+            "it carries no split information, so validation falls back to a "
+            "holdout from the training data. Use --split for real evaluation."
+        ),
+    )
+    p_train.add_argument(
+        "--cache-dir",
+        default=None,
+        help="where --split writes its extracted trials (default: <out>/cache)",
+    )
+    p_train.add_argument(
+        "--decimate",
+        type=int,
+        default=8,
+        help="downsample factor applied when extracting from a --split",
+    )
     p_train.add_argument("--out", required=True, help="checkpoint output directory")
     p_train.add_argument("--epochs", type=int, default=10)
     p_train.add_argument("--batch-size", type=int, default=8)
@@ -160,12 +188,93 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     p_eval = sub.add_parser("evaluate", help="evaluate a checkpoint")
-    p_eval.add_argument("--cache", required=True)
+    p_eval.add_argument(
+        "--split",
+        default=None,
+        help="split tree to evaluate on (uses its test part); preferred over --cache",
+    )
+    p_eval.add_argument("--split-part", default=None, help="which part of --split to evaluate on")
+    p_eval.add_argument("--cache", default=None, help="directory of pre-extracted .npz trials")
+    p_eval.add_argument("--cache-dir", default=None, help="where extracted trials are cached")
+    p_eval.add_argument("--decimate", type=int, default=8)
+    p_eval.add_argument("--out", default=None, help="used to locate the cache directory")
     p_eval.add_argument("--checkpoint", required=True)
     p_eval.add_argument("--device", default=None)
     p_eval.add_argument("--n-samples", type=int, default=8000)
     p_eval.add_argument("--beam-width", type=int, default=1, help="1 means greedy")
     return parser
+
+
+def _load_caches(caches: list[Path], n_samples: int):
+    """Build a dataset and tokenizer from explicit cache files."""
+    import numpy as np
+
+    from bci_eeg_to_text.data import TrialDataset
+    from bci_eeg_to_text.tokenizer import CharTokenizer
+
+    if not caches:
+        raise SystemExit("no trials to evaluate on")
+    texts: list[str] = []
+    n_channels: int | None = None
+    for path in caches:
+        with np.load(path, allow_pickle=True) as data:
+            texts.extend(str(t) for t in data["texts"])
+            if n_channels is None:
+                n_channels = int(data["n_channels"])
+    tokenizer = CharTokenizer.build(texts)
+    return TrialDataset(caches, tokenizer, n_samples=n_samples), tokenizer, int(n_channels or 0)
+
+
+def _extract_split_part(tree, part: str, args: argparse.Namespace) -> tuple[list[Path], list[str]]:
+    """Extract one part of a split tree into its cache directory."""
+    from bci_eeg_to_text.splitdata import extract_part
+
+    cache_dir = Path(args.cache_dir or (Path(args.out or ".") / "cache"))
+    return extract_part(tree, part, cache_dir / part, decimate=args.decimate)
+
+
+def _data_from_split(args: argparse.Namespace):
+    """Build datasets from a materialised split tree.
+
+    Training reads the split, so subject-level and run-level splits behave
+    identically here: the difference is only what the links point at.
+    """
+    from bci_eeg_to_text.splitdata import BuildError, build_training_data
+    from bci_eeg_to_text.splittree import (
+        SplitTreeError,
+        check_no_leakage,
+        load_split_tree,
+        summarise,
+    )
+
+    try:
+        tree = load_split_tree(args.split)
+        # Leakage is an error, not a warning: a trial shared between train and
+        # test inflates scores while looking like a good model.
+        check_no_leakage(tree)
+    except SplitTreeError as exc:
+        raise SystemExit(f"error: {exc}") from exc
+    print(summarise(tree))
+    for warning in tree.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+
+    cache_dir = Path(args.cache_dir or (Path(args.out) / "cache"))
+    try:
+        built = build_training_data(
+            tree,
+            n_samples=args.n_samples,
+            cache_dir=cache_dir,
+            decimate=args.decimate,
+        )
+    except BuildError as exc:
+        raise SystemExit(f"error: {exc}") from exc
+    return (
+        built.train,
+        built.valid,
+        built.tokenizer,
+        built.n_channels,
+        built.valid_part,
+    )
 
 
 def _default_ratios(dataset: str) -> dict[str, int]:
@@ -457,12 +566,32 @@ def cmd_train(args: argparse.Namespace) -> int:
         train_one_epoch,
     )
 
+    if not args.split and not args.cache:
+        print(
+            "error: provide --split <tree> (preferred) or --cache <dir>.\n"
+            "Create a split first:\n"
+            "  bci-eeg-to-text split --dataset chisco --link\n"
+            "  bci-eeg-to-text train --split splits --out runs/exp1",
+            file=sys.stderr,
+        )
+        return 2
+
     device = resolve_device(args.device)
-    dataset, tokenizer, n_channels = _load_dataset(Path(args.cache), args.n_samples)
+    if args.split:
+        dataset, valid_dataset, tokenizer, n_channels, valid_part = _data_from_split(args)
+    else:
+        dataset, tokenizer, n_channels = _load_dataset(Path(args.cache), args.n_samples)
+        valid_dataset, valid_part = None, None
     print(
         f"device={device} mode={args.mode} trials={len(dataset)} "
         f"channels={n_channels} classes={len(tokenizer)}"
     )
+    if valid_dataset is None:
+        print(
+            "warning: no validation split; falling back to a holdout from the "
+            "training data. Use --split for a participant-level evaluation.",
+            file=sys.stderr,
+        )
 
     torch.manual_seed(args.seed)
     extra: dict[str, object] = {"frontend_stride": args.frontend_stride}
@@ -493,9 +622,17 @@ def cmd_train(args: argparse.Namespace) -> int:
         print("warning: --freeze-backbone had no effect for this mode", file=sys.stderr)
 
     trials = [dataset[i] for i in range(len(dataset))]
-    split = max(1, int(len(trials) * 0.9))
-    train_batches = make_batches(trials[:split], args.batch_size, shuffle=True, seed=args.seed)
-    valid_batches = make_batches(trials[split:], args.batch_size)
+    if valid_dataset is not None:
+        # A real held-out part: no trial is shared with training.
+        train_batches = make_batches(trials, args.batch_size, shuffle=True, seed=args.seed)
+        valid_batches = make_batches(
+            [valid_dataset[i] for i in range(len(valid_dataset))], args.batch_size
+        )
+        print(f"validation part: {valid_part} ({len(valid_dataset)} trials)")
+    else:
+        split = max(1, int(len(trials) * 0.9))
+        train_batches = make_batches(trials[:split], args.batch_size, shuffle=True, seed=args.seed)
+        valid_batches = make_batches(trials[split:], args.batch_size)
 
     config = TrainConfig(epochs=args.epochs, batch_size=args.batch_size, learning_rate=args.lr)
     # Optimise only what is trainable; passing frozen weights to AdamW wastes
@@ -558,8 +695,37 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     )
     from bci_eeg_to_text.train import evaluate, make_batches, move_batch_to_device, resolve_device
 
+    if not args.split and not args.cache:
+        print(
+            "error: provide --split <tree> (preferred) or --cache <dir>",
+            file=sys.stderr,
+        )
+        return 2
+
     device = resolve_device(args.device)
-    dataset, tokenizer, n_channels = _load_dataset(Path(args.cache), args.n_samples)
+    if args.split:
+        # Evaluate on the held-out part of the same split used for training.
+        from bci_eeg_to_text.splittree import (
+            SplitTreeError,
+            check_no_leakage,
+            load_split_tree,
+            summarise,
+        )
+
+        try:
+            tree = load_split_tree(args.split)
+            check_no_leakage(tree)
+        except SplitTreeError as exc:
+            raise SystemExit(f"error: {exc}") from exc
+        print(summarise(tree))
+        part = args.split_part or ("test" if "test" in tree.parts else None)
+        if part is None or not tree.parts.get(part):
+            raise SystemExit("error: --split has no test part to evaluate on")
+        eval_paths, _ = _extract_split_part(tree, part, args)
+        dataset, tokenizer, n_channels = _load_caches(eval_paths, args.n_samples)
+        print(f"evaluating on part {part!r} ({len(dataset)} trials)")
+    else:
+        dataset, tokenizer, n_channels = _load_dataset(Path(args.cache), args.n_samples)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     # Rebuild exactly the architecture that was trained; the mode and backbone
     # options are stored in the checkpoint for this reason.

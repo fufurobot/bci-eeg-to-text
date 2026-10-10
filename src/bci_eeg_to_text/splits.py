@@ -216,13 +216,20 @@ def _split_by_run(
 def validate_subject_disjoint(
     split: Split, participants: Mapping[str, Participant] | Iterable[str]
 ) -> None:
-    """Assert that no subject appears in more than one part."""
+    """Assert that no subject appears in more than one part.
+
+    Only meaningful for subject-level splits. A run-level split deliberately
+    shares participants across parts, so applying this check there would reject
+    every valid split; the caller opts in by asking for subject level.
+    """
+    if not split.subject_level:
+        return
     seen: dict[str, str] = {}
-    for part, subjects in split.parts.items():
-        for subject in subjects:
-            if subject in seen:
+    for part, entries in split.parts.items():
+        for entry in entries:
+            if entry in seen:
                 raise SplitError(
-                    f"subject {subject!r} appears in both {seen[subject]!r} and {part!r}; "
+                    f"subject {entry!r} appears in both {seen[entry]!r} and {part!r}; "
                     "this leaks participant identity across parts"
                 )
-            seen[subject] = part
+            seen[entry] = part

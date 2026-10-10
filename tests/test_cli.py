@@ -454,3 +454,57 @@ class TestSplitCommand:
                     str(tmp_path / "absent"),
                 ]
             )
+
+
+class TestSplitDrivenTraining:
+    """Training reads a split tree, so `--cache` is no longer an input.
+
+    This is what makes run-level and subject-level splits behave identically:
+    the trainer consumes whichever tree it is given.
+    """
+
+    def _make_split_tree(self, tmp_path: Path) -> Path:
+        """A two-subject tree with one extraction-ready subject per part."""
+
+        split_root = tmp_path / "splits"
+        for part, subject in (("train", "sub-01"), ("test", "sub-02")):
+            cache = split_root / part / subject
+            cache.mkdir(parents=True)
+            write_cache(cache / f"{subject}_run-01.npz", 3, "你好")
+        (split_root / "split.json").write_text(
+            json.dumps({"subject_level": True, "warnings": [], "parts": {}})
+        )
+        return split_root
+
+    def test_train_requires_split_or_cache(self, tmp_path: Path, capsys) -> None:
+        code = main(["train", "--out", str(tmp_path / "runs")])
+        assert code == 2
+        assert "provide --split" in capsys.readouterr().err
+
+    def test_train_reports_missing_split_tree_cleanly(self, tmp_path: Path) -> None:
+        with pytest.raises(SystemExit, match="no split tree"):
+            main(
+                [
+                    "train",
+                    "--split",
+                    str(tmp_path / "absent"),
+                    "--out",
+                    str(tmp_path / "runs"),
+                ]
+            )
+
+    def test_evaluate_requires_split_or_cache(self, tmp_path: Path, capsys) -> None:
+        code = main(["evaluate", "--checkpoint", str(tmp_path / "c.pt")])
+        assert code == 2
+        assert "provide --split" in capsys.readouterr().err
+
+    def test_train_parser_accepts_split(self) -> None:
+        args = build_parser().parse_args(["train", "--split", "splits", "--out", "r"])
+        assert args.split == "splits"
+        assert args.cache is None
+
+    def test_evaluate_parser_accepts_split_part(self) -> None:
+        args = build_parser().parse_args(
+            ["evaluate", "--split", "splits", "--checkpoint", "c.pt", "--split-part", "valid"]
+        )
+        assert args.split_part == "valid"

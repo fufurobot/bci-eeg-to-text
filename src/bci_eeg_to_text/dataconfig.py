@@ -230,9 +230,18 @@ def materialise_split(
                 if not sources:
                     result.skipped.append((entry, "no files for run"))
                     continue
+                # Nest by subject AND run. Flattening all of a subject's runs
+                # into one directory makes two different parts able to write
+                # the same path -- which silently leaks a run across train and
+                # test when the two corpora share a subject id.
+                # `run` may be "ses-X/run-01"; nesting by it reproduces the
+                # session layer so two same-numbered runs never collide.
+                run_dir = link_root / subject / Path(run)
+                session, _, bare = run.rpartition("/")
                 for source in sources:
-                    relative_symlink(source, link_root / subject / source.name)
+                    relative_symlink(source, run_dir / source.name)
                     result.n_links += 1
+                _ = (session, bare)
 
             result.parts[part] = result.parts.get(part, 0) + 1
 
@@ -280,15 +289,36 @@ def _run_files(corpus: Path, subject: str, run: str) -> list[Path]:
     """
     from bci_eeg_to_text.eeg import is_annex_pointer
 
-    stem = f"_{run}_"
+    # `run` may be session-qualified ("ses-GarnettDream/run-01") because run
+    # numbers repeat across sessions. Requiring the session when given is what
+    # stops run-01 of one session from being linked into a split part that only
+    # asked for run-01 of the other.
+    session, _, bare = run.rpartition("/")
+    # Compare run numbers numerically: corpora disagree on zero padding
+    # (chisco calls it "run-001" where the file says "run-01"), so a string
+    # comparison silently matches nothing.
+    wanted = _run_number(bare)
     files: list[Path] = []
-    for path in sorted(corpus.glob(f"**/{subject}_*{stem}*")):
+    for path in sorted(corpus.glob(f"**/{subject}_*")):
         if not path.is_file() or path.is_symlink():
+            continue
+        fields = path.name.replace(".", "_").split("_")
+        file_runs = {_run_number(f) for f in fields if f.startswith("run-")}
+        if wanted is None or wanted not in file_runs:
+            continue
+        if session and session not in fields:
             continue
         if is_annex_pointer(path):
             continue
         files.append(path)
     return files
+
+
+def _run_number(token: str) -> int | None:
+    """Numeric value of a ``run-NN`` token, ignoring zero padding."""
+    _, _, digits = token.partition("run-")
+    digits = digits.strip()
+    return int(digits) if digits.isdigit() else None
 
 
 def load_split_manifest(path: str | Path) -> dict:
