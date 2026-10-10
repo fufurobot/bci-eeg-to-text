@@ -139,6 +139,8 @@ class MaterialisedSplit:
     n_links: int
     parts: dict[str, int] = field(default_factory=dict)
     skipped: list[tuple[str, str]] = field(default_factory=list)
+    #: Small text sidecars copied in so the pairing is human-readable.
+    n_text_copies: int = 0
 
     @property
     def manifest_path(self) -> Path:
@@ -167,6 +169,9 @@ def materialise_split(
     corpus_paths: dict[str, Path],
     cwd: Path | None = None,
     link_runs: bool = True,
+    leakage_mode: str | None = None,
+    leakage_violations: int | None = None,
+    copy_text: bool = True,
 ) -> MaterialisedSplit:
     """Write a split as a tree of relative symlinks plus a manifest.
 
@@ -225,6 +230,12 @@ def materialise_split(
                 link = link_root / source.name
                 relative_symlink(source, link)
                 result.n_links += 1
+                if copy_text:
+                    # Write text beside the link, never through it: the link
+                    # points into the (read-only) dataset, and a copy landing
+                    # there would be both an error and a surprise.
+                    text_dir = link_root / f"{source.name}.text"
+                    result.n_text_copies += copy_text_companions(text_dir, corpus, subject)
             else:
                 sources = _run_files(corpus, subject, run)
                 if not sources:
@@ -241,12 +252,18 @@ def materialise_split(
                 for source in sources:
                     relative_symlink(source, run_dir / source.name)
                     result.n_links += 1
+                if copy_text:
+                    result.n_text_copies += copy_text_companions(
+                        run_dir, corpus, subject, session=session or None, run=bare
+                    )
                 _ = (session, bare)
 
             result.parts[part] = result.parts.get(part, 0) + 1
 
     manifest = {
         "level": "run" if not split.subject_level else "subject",
+        "leakage_mode": leakage_mode,
+        "leakage_violations": leakage_violations,
         "subject_level": split.subject_level,
         "warnings": list(split.warnings),
         "data_root": str(data.root),
@@ -254,12 +271,83 @@ def materialise_split(
         "writable_root": data.assume_writable,
         "parts": {k: list(v) for k, v in split.parts.items()},
         "n_links": result.n_links,
+        "n_text_copies": result.n_text_copies,
         "skipped": result.skipped,
     }
     result.manifest_path.write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     return result
+
+
+def copy_text_companions(
+    entry_dir: Path,
+    corpus: Path,
+    subject: str,
+    *,
+    session: str | None = None,
+    run: str | None = None,
+) -> int:
+    """Copy small text sidecars next to a subject's links.
+
+    Recordings stay symlinked because they are gigabytes. The text files that
+    say *what the participant was reading* are kilobytes, so copying them is
+    cheap and makes the pairing inspectable: `ls` inside a split shows the EEG
+    links and the stimulus text side by side, rather than leaving a reader to
+    re-derive which row applies to which recording.
+
+    Only files that are plainly text are copied; data formats are never touched.
+    """
+    import shutil
+
+    # Everything is filtered by size. The point is to copy the small text that
+    # describes what was read, never the recordings.
+    max_bytes = 2 * 1024 * 1024
+    candidates: list[Path] = []
+
+    # Per-subject text (events, channels, stimulus lists).
+    for pattern in ("*.txt", "*.tsv", "*.json", "*.csv"):
+        candidates.extend(corpus.glob(f"**/{subject}_*{pattern}"))
+        candidates.extend(corpus.glob(f"**/{subject}/*{pattern}"))
+
+    # Dataset-level text: the participants table and stimulus maps describe the
+    # pairing even though they are not subject-prefixed.
+    for pattern in ("participants.tsv", "*.json", "*.txt", "*.csv"):
+        candidates.extend(corpus.glob(pattern))
+        text_dir = corpus / "json"
+        if text_dir.is_dir():
+            candidates.extend(text_dir.glob(pattern))
+
+    copied = 0
+    for source in sorted(set(candidates)):
+        if not source.is_file() or source.is_symlink():
+            continue
+        try:
+            if source.stat().st_size > max_bytes:
+                continue
+        except OSError:
+            continue
+        # Session/run filters apply only to per-subject files. Dataset-level
+        # text such as participants.tsv describes every part and is kept as is.
+        is_subject_file = source.name.startswith(subject)
+        fields = source.name.replace(".", "_").split("_")
+        if is_subject_file and session and session not in fields:
+            continue
+        if is_subject_file and run:
+            wanted = _run_number(run)
+            file_runs = {_run_number(f) for f in fields if f.startswith("run-")}
+            if file_runs and wanted not in file_runs:
+                continue
+        target = entry_dir / source.name
+        if target.exists():
+            continue
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            copied += 1
+        except OSError:
+            continue
+    return copied
 
 
 def _subject_dir(corpus: Path, subject: str) -> Path | None:

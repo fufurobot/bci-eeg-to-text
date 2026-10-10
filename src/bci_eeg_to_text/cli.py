@@ -16,6 +16,8 @@ from bci_eeg_to_text.dataconfig import (
     DEFAULT_DATA_SUBDIR,
     DataConfig,
 )
+from bci_eeg_to_text.leakage import LEAKAGE_MODES, describe_mode
+from bci_eeg_to_text.textstructure import DEFAULT_LEAKAGE_MODE
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
@@ -99,6 +101,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-link", dest="link", action="store_false", help="only print the split"
     )
     p_split.set_defaults(link=True)
+    p_split.add_argument(
+        "--leakage",
+        default=DEFAULT_LEAKAGE_MODE,
+        choices=list(LEAKAGE_MODES),
+        help=(
+            "text leakage policy: " + "; ".join(f"{m} = {describe_mode(m)}" for m in LEAKAGE_MODES)
+        ),
+    )
+    p_split.add_argument(
+        "--no-text-copy",
+        dest="copy_text",
+        action="store_false",
+        help=(
+            "do not copy small text sidecars into the split. By default they are "
+            "copied next to the EEG links so the EEG-to-text pairing is "
+            "inspectable with ls; recordings are always symlinked, never copied"
+        ),
+    )
+    p_split.set_defaults(copy_text=True)
     p_split.add_argument("--out", default=None, help="also write the split as JSON here")
 
     p_inspect = sub.add_parser("inspect", help="report an EDF run without extracting")
@@ -233,6 +254,82 @@ def _extract_split_part(tree, part: str, args: argparse.Namespace) -> tuple[list
     return extract_part(tree, part, cache_dir / part, decimate=args.decimate)
 
 
+def _assess_text_leakage(sources, mode: str, config) -> object:
+    """Group every row by paragraph/article and report cross-part leakage.
+
+    Rows are located inside the source novels by string search, so the report
+    states how much text structure was actually recovered rather than implying
+    full coverage.
+    """
+    from bci_eeg_to_text.chineseeeg import read_segmented_novel
+    from bci_eeg_to_text.leakage import (
+        check_leakage,
+        describe_mode,
+        summarize_coverage,
+        units_from_labels,
+    )
+    from bci_eeg_to_text.textstructure import (
+        TextStructureError,
+        find_source_documents,
+        label_rows,
+        read_document,
+    )
+
+    collected: dict[str, list] = {}
+    for source in sources:
+        if source.name != "chineseeeg":
+            # Chisco stimuli are short standalone sentences with no surrounding
+            # document, so only row-level identity is available there.
+            continue
+        docs = find_source_documents(source.root())
+        for novel, path in docs.items():
+            try:
+                document = read_document(path, novel)
+            except TextStructureError:
+                continue
+            # Every participant read the SAME novel, so rows must be collected
+            # per document, not per (subject, run): otherwise the same sentence
+            # is counted once per participant and inflates the totals by ~10x.
+            #
+            # Only label files that actually belong to THIS document. Labelling
+            # every run against every novel would credit one novel with the
+            # other's rows and halve the apparent coverage.
+            seen_files: set[str] = set()
+            for run in source.runs():
+                if novel not in (run.session or ""):
+                    continue
+                paths = [p for p in source.novel_paths(run) if "_display" not in p.name]
+                if not paths:
+                    continue
+                key = paths[0].name
+                if key in seen_files:
+                    continue
+                seen_files.add(key)
+                try:
+                    texts = read_segmented_novel(paths[0])
+                except Exception:  # noqa: BLE001
+                    continue
+                # Each run file starts partway through the novel, so the search
+                # cursor must restart or later files locate almost nothing.
+                document.reset_cursor()
+                collected.setdefault(novel, []).extend(label_rows(texts, document))
+
+    if not collected:
+        print(f"leakage: {describe_mode(mode)} (no source text found to check)")
+        return None
+
+    all_units = units_from_labels([label for labels in collected.values() for label in labels])
+    print(f"leakage: {describe_mode(mode)}")
+    print(f"  {summarize_coverage(all_units, mode)}")
+    report = check_leakage({mode: all_units}, mode)
+    if report.unplaced_rows:
+        print(
+            f"  {report.unplaced_rows} rows could not be located in the source text; "
+            "they fall back to row identity and cannot leak by paragraph/article"
+        )
+    return report
+
+
 def _data_from_split(args: argparse.Namespace):
     """Build datasets from a materialised split tree.
 
@@ -334,6 +431,13 @@ def cmd_split(args: argparse.Namespace) -> int:
     )
     validate_subject_disjoint(split, participants)
 
+    # Text leakage is checked independently of participant leakage: two parts
+    # can hold disjoint subjects yet share the prose they were reading, letting
+    # a model memorise text rather than learn to decode EEG.
+    leakage_report = None
+    if args.leakage != "none":
+        leakage_report = _assess_text_leakage(sources, args.leakage, config)
+
     by_id = {p.subject_id: p for p in participants}
     print(f"dataset: {args.dataset}  level: {args.level}  ratios: {ratios}  seed: {args.seed}")
     for part, entries in split.parts.items():
@@ -352,6 +456,17 @@ def cmd_split(args: argparse.Namespace) -> int:
             label = entry if not split.subject_level else subject
             print(f"  {label} ({by_id[subject].sex or 'sex unknown'})")
 
+    if leakage_report is not None and not leakage_report.ok:
+        # Participant-level splitting divides subjects, not documents, so it
+        # cannot by itself remove text overlap. Report it honestly instead of
+        # implying the constraint holds.
+        print(
+            f"  NOTE: {len(leakage_report.violations)} text groups span parts at "
+            f"{args.leakage} level. Dividing subjects cannot remove text overlap; "
+            "use --leakage none to silence this, or partition by document.",
+            file=sys.stderr,
+        )
+
     # A run-level split is legitimate but is not a generalisation estimate, so
     # say so loudly rather than letting the number be misread.
     for warning in split.warnings:
@@ -369,6 +484,10 @@ def cmd_split(args: argparse.Namespace) -> int:
                 data=config,
                 corpus_paths=corpus_paths,
                 cwd=Path.cwd(),
+                leakage_mode=args.leakage,
+                leakage_violations=(
+                    len(leakage_report.violations) if leakage_report is not None else None
+                ),
             )
         except DataAccessError as exc:
             print(f"error: {exc}", file=sys.stderr)

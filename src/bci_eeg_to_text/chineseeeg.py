@@ -353,7 +353,11 @@ class ChineseEEGSource:
         if not directory.exists():
             return []
         run_no = int(run.run.split("-")[1])
-        return sorted(directory.glob(f"*run_{run_no}*.xlsx"))
+        # Match the run number as an exact token. A glob of "*run_1*" would also
+        # match run_10..run_19, silently pairing a run with the wrong chapter
+        # text -- and it did, until this was caught.
+        pattern = re.compile(rf"run_{run_no}(?!\d)")
+        return sorted(path for path in directory.glob("*.xlsx") if pattern.search(path.stem))
 
     def extract(self, run: RunInfo, out_path: Path, **options: object) -> ExtractionReport:
         import mne

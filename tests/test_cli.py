@@ -389,7 +389,7 @@ class TestSplitCommand:
         return tmp_path
 
     def test_chisco_uses_one_to_one(self, capsys) -> None:
-        code = main(["split", "--dataset", "chisco"])
+        code = main(["split", "--no-link", "--dataset", "chisco"])
         if code != 0:
             pytest.skip("dataset not mounted")
         out = capsys.readouterr().out
@@ -397,7 +397,7 @@ class TestSplitCommand:
         assert "1F/1M" in out
 
     def test_chineseeeg_uses_three_one_one(self, capsys) -> None:
-        code = main(["split", "--dataset", "chineseeeg"])
+        code = main(["split", "--no-link", "--dataset", "chineseeeg"])
         if code != 0:
             pytest.skip("dataset not mounted")
         out = capsys.readouterr().out
@@ -405,29 +405,31 @@ class TestSplitCommand:
         assert "3F/3M" in out
 
     def test_ratios_can_be_overridden(self, capsys) -> None:
-        code = main(["split", "--dataset", "chineseeeg", "--ratios", "train=1,test=1"])
+        code = main(["split", "--no-link", "--dataset", "chineseeeg", "--ratios", "train=1,test=1"])
         if code != 0:
             pytest.skip("dataset not mounted")
         assert "'train': 1, 'test': 1" in capsys.readouterr().out
 
     def test_run_level_warns_on_stderr(self, tmp_path, monkeypatch, capsys) -> None:
         # Materialising links writes files, so run in a scratch directory.
+        # --no-link keeps this fast: linking itself is covered by
+        # tests/test_dataconfig.py against a synthetic corpus.
         monkeypatch.chdir(tmp_path)
-        code = main(["split", "--dataset", "chisco", "--level", "run"])
+        code = main(["split", "--dataset", "chisco", "--level", "run", "--no-link"])
         if code != 0:
             pytest.skip("dataset not mounted")
         err = capsys.readouterr().err
         assert "NOT a cross-subject estimate" in err
 
     def test_subject_level_does_not_warn(self, capsys) -> None:
-        code = main(["split", "--dataset", "chisco"])
+        code = main(["split", "--no-link", "--dataset", "chisco"])
         if code != 0:
             pytest.skip("dataset not mounted")
         assert "NOT a cross-subject" not in capsys.readouterr().err
 
     def test_writes_json_when_asked(self, tmp_path, capsys) -> None:
         out = tmp_path / "split.json"
-        code = main(["split", "--dataset", "chisco", "--out", str(out)])
+        code = main(["split", "--no-link", "--dataset", "chisco", "--out", str(out)])
         if code != 0:
             pytest.skip("dataset not mounted")
         pytest.importorskip("json")
