@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 import pytest
 import torch
@@ -32,7 +34,11 @@ def model() -> EEGToTextCTC:
 
 
 def make_trial(tokenizer: CharTokenizer, text: str, n_samples: int = 512) -> Trial:
-    rng = np.random.default_rng(abs(hash(text)) % (2**32))
+    # Seed from a stable digest, not hash(): Python randomises str hashing per
+    # process, which made this helper (and any test asserting on random-model
+    # numerics) flaky across runs.
+    seed = int.from_bytes(hashlib.sha256(text.encode()).digest()[:4], "big")
+    rng = np.random.default_rng(seed)
     return Trial(
         eeg=rng.standard_normal((4, n_samples)).astype(np.float32),
         target=np.array(tokenizer.encode(text), dtype=np.int64),

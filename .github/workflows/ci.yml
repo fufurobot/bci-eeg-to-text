@@ -37,11 +37,16 @@ jobs:
           uv venv
           uv pip install --index-url https://download.pytorch.org/whl/cpu torch
           uv pip install mne pyedflib pytest pytest-cov
+          uv pip install transformers
           uv pip install -e . --no-deps
 
       # Real-data tests need the external EEG mounts (~419 GB). They skip
       # themselves when absent, which is the case in CI.
+      # The backbone tests build tiny checkpoints locally instead of
+      # downloading them, so they run without network access.
       - name: Test with coverage
+        env:
+          HF_HUB_OFFLINE: "1"
         run: |
           uv run pytest -q -m "not realdata" \
             --cov=src/bci_eeg_to_text \

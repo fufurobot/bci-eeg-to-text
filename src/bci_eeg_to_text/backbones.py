@@ -240,9 +240,7 @@ def make_bert_backbone(config: BackboneConfig) -> type[nn.Module]:
             features = self.input_norm(self.input_conv(x))
             factor = self.pool_factor or self._pool_factor_for(features.shape[-1])
             if factor > 1:
-                features = nn.functional.avg_pool1d(
-                    features, kernel_size=factor, stride=factor
-                )
+                features = nn.functional.avg_pool1d(features, kernel_size=factor, stride=factor)
             embeddings = self.adapter(features.transpose(1, 2))
             out = self.bert(inputs_embeds=embeddings)
             return out.last_hidden_state
@@ -265,9 +263,7 @@ def make_bert_backbone(config: BackboneConfig) -> type[nn.Module]:
             ).clamp(min=1)
             if self.pool_factor is not None:
                 if self.pool_factor > 1:
-                    frames = torch.div(
-                        frames, self.pool_factor, rounding_mode="floor"
-                    ).clamp(min=1)
+                    frames = torch.div(frames, self.pool_factor, rounding_mode="floor").clamp(min=1)
                 return frames.to(torch.long)
             # Adaptive pooling: mirror _pool_factor_for per element.
             factors = torch.ceil(frames / self.max_frames).clamp(min=1)
@@ -385,8 +381,7 @@ def make_neurolm_backbone(config: BackboneConfig) -> type[nn.Module]:
         from transformers import AutoConfig, AutoModel
     except ImportError as exc:  # pragma: no cover - depends on environment
         raise BackboneError(
-            "NeuroLM modes require the transformers package; "
-            "install it with `uv add transformers`"
+            "NeuroLM modes require the transformers package; install it with `uv add transformers`"
         ) from exc
 
     lm_name = str(config.extra.get("lm_name", "gpt2"))

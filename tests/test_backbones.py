@@ -52,9 +52,7 @@ def tiny_checkpoints() -> dict[str, str]:
         ).save_pretrained(bert)
     if not gpt2.exists():
         GPT2LMHeadModel(
-            GPT2Config(
-                vocab_size=128, n_embd=32, n_layer=2, n_head=4, n_positions=128
-            )
+            GPT2Config(vocab_size=128, n_embd=32, n_layer=2, n_head=4, n_positions=128)
         ).save_pretrained(gpt2)
     return {"bert": str(bert), "gpt2": str(gpt2)}
 
@@ -69,9 +67,7 @@ class TestLengthMap:
 
     def test_estimate_helper_agrees_with_tensor_version(self) -> None:
         for n in (1, 7, 100, 999):
-            assert estimate_output_frames(n, 8) == resolve_length_map(
-                torch.tensor([n]), 8
-            ).item()
+            assert estimate_output_frames(n, 8) == resolve_length_map(torch.tensor([n]), 8).item()
 
     def test_estimate_of_empty_is_zero(self) -> None:
         assert estimate_output_frames(0, 8) == 0
@@ -175,9 +171,7 @@ class TestBuildCTCModel:
             ("scratch", {}),
             ("bert-ctc", {"pretrained": tiny_checkpoints["bert"]}),
         ]:
-            model = build_ctc_model(
-                mode, n_channels=4, n_classes=12, d_model=32, **kwargs
-            ).eval()
+            model = build_ctc_model(mode, n_channels=4, n_classes=12, d_model=32, **kwargs).eval()
             n = 2048
             with torch.no_grad():
                 frames = model(torch.randn(1, 4, n)).shape[1]
@@ -219,9 +213,9 @@ class TestFreezing:
             freeze_backbone=True,
         )
         model(torch.randn(1, 4, 2048)).sum().backward()
-        assert all(
-            p.grad is None for p in model.backbone.bert.parameters()
-        ), "frozen BERT weights must not accumulate gradients"
+        assert all(p.grad is None for p in model.backbone.bert.parameters()), (
+            "frozen BERT weights must not accumulate gradients"
+        )
         assert any(
             p.grad is not None and p.grad.abs().sum() > 0
             for p in model.backbone.adapter.parameters()
@@ -241,9 +235,7 @@ class TestFreezing:
 
 
 class TestBertLongSequences:
-    def test_adaptive_pooling_keeps_long_trials_within_limit(
-        self, tiny_checkpoints
-    ) -> None:
+    def test_adaptive_pooling_keeps_long_trials_within_limit(self, tiny_checkpoints) -> None:
         """BERT has a fixed context; long EEG trials must be pooled, not crash."""
         model = build_ctc_model(
             "bert-ctc",

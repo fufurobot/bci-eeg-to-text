@@ -48,11 +48,12 @@ def repo_root() -> Path | None:
     env = os.environ.get("NEUROLM_ROOT")
     if env:
         candidates.append(Path(env))
+    # Only location-independent candidates: baking in one machine's absolute
+    # path would make behaviour depend on who runs it.
     candidates += [
         Path("NeuroLM"),
         Path("../NeuroLM"),
         Path("third_party/NeuroLM"),
-        Path("/home/fufu/poc/bci-eeg/NeuroLM"),
     ]
     for candidate in candidates:
         if (candidate / "model" / "model_neurolm.py").exists():
@@ -101,8 +102,11 @@ def load_neuro_processor(
             "--processor scratch to train our own."
         ) from None
 
-    model = NeuralTransformerVQ(n_channels=n_channels, d_model=d_model)
+    # Infer the architecture from the checkpoint itself; assuming the published
+    # shape would fail to load any variant with different dimensions.
     mapped = {k.removeprefix("VQ.encoder."): v for k, v in state.items()}
+    config = _infer_vq_config(mapped, fallback_d_model=d_model)
+    model = NeuralTransformerVQ(n_channels=n_channels, config=config)
     missing, unexpected = model.load_state_dict(mapped, strict=False)
     model.load_metadata = {  # type: ignore[attr-defined]
         "source": str(path),
@@ -112,6 +116,43 @@ def load_neuro_processor(
     for param in model.parameters():
         param.requires_grad = False
     return model
+
+
+def _infer_vq_config(state: dict, *, fallback_d_model: int):
+    """Derive tokenizer dimensions from a checkpoint's tensor shapes."""
+    from bci_eeg_to_text.neurolm_native import VQConfig
+
+    def shape(key: str) -> tuple[int, ...] | None:
+        tensor = state.get(key)
+        return tuple(tensor.shape) if tensor is not None else None
+
+    codebook = shape("quantizer.embed.weight")
+    codebook_size, codebook_dim = codebook if codebook else (8192, fallback_d_model)
+
+    layers = {
+        int(key.split(".")[1])
+        for key in state
+        if key.startswith("blocks.") and key.endswith("attn.weight")
+    }
+    n_layer = max(layers) + 1 if layers else 12
+
+    attn = shape("blocks.0.attn.weight")
+    n_embd = attn[0] // 3 if attn else 400
+
+    pos = shape("pos_embed.weight")
+    block_size = pos[0] if pos else 1024
+
+    config = VQConfig(
+        n_layer=n_layer,
+        n_embd=n_embd,
+        block_size=block_size,
+        codebook_size=codebook_size,
+        codebook_dim=codebook_dim,
+    )
+    patch = shape("patch_embed.proj.weight")
+    if patch:
+        config.patch_size = int(patch[-1])
+    return config
 
 
 def describe_neuro_processor(processor: nn.Module) -> str:

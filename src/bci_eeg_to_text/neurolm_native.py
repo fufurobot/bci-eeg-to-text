@@ -26,7 +26,9 @@ class VQConfig:
     """Tokenizer dimensions, defaulting to NeuroLM's published settings."""
 
     n_layer: int = 12
-    n_head: int = 10
+    #: 0 means "derive from n_embd" so small test widths stay valid while
+    #: NeuroLM's published 400/10 ratio is preserved by default.
+    n_head: int = 0
     n_embd: int = 400
     block_size: int = 1024
     bias: bool = False
@@ -37,6 +39,17 @@ class VQConfig:
     codebook_dim: int = 64
     #: Number of raw EEG samples per patch.
     patch_size: int = 200
+
+    def __post_init__(self) -> None:
+        """Resolve ``n_head`` so ``n_embd`` is always divisible by it."""
+        if self.n_head <= 0:
+            # Match NeuroLM's published 400/10 ratio, snapping to a divisor.
+            for candidate in (10, 8, 6, 4, 2, 1):
+                if self.n_embd % candidate == 0:
+                    self.n_head = candidate
+                    break
+            else:
+                self.n_head = 1
 
 
 class PatchEmbed(nn.Module):
