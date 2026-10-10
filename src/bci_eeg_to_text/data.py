@@ -218,3 +218,32 @@ def discover_runs(dataset_root: str | Path) -> list[Path]:
     """List every EDF run in the dataset, sorted for reproducibility."""
     root = Path(dataset_root)
     return sorted(root.glob("sub-*/ses-*/eeg/*_eeg.edf"))
+
+
+def write_trial_cache(
+    out_path: Path,
+    trials: list[np.ndarray],
+    texts: list[str],
+    lengths: list[int],
+    onsets: list[int],
+    meta: dict[str, object],
+) -> None:
+    """Persist ragged trials as one flat array plus per-trial offsets.
+
+    Trials differ in length, so they cannot be stacked into a dense array; the
+    offsets array reconstructs each trial losslessly.
+    """
+    flat = np.concatenate([t.astype(np.float32) for t in trials], axis=1)
+    offsets = np.zeros(len(trials) + 1, dtype=np.int64)
+    np.cumsum([t.shape[1] for t in trials], out=offsets[1:])
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        out_path,
+        flat=flat,
+        offsets=offsets,
+        n_channels=np.array(trials[0].shape[0]),
+        texts=np.array(texts, dtype=object),
+        lengths=np.array(lengths, dtype=np.int64),
+        onsets=np.array(onsets, dtype=np.int64),
+        **meta,
+    )

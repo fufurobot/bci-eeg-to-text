@@ -84,8 +84,7 @@ class TestSubjectLevelSplits:
         split = make_splits(CHINESEEG, seed=0)
         by_id = {p.subject_id: p for p in CHINESEEG}
         counts = {
-            part: Counter(by_id[s].sex for s in subjects)
-            for part, subjects in split.parts.items()
+            part: Counter(by_id[s].sex for s in subjects) for part, subjects in split.parts.items()
         }
         assert counts["train"] == Counter({"F": 3, "M": 3})
         assert counts["valid"] == Counter({"F": 1, "M": 1})
