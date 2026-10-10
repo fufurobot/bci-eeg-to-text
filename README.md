@@ -66,6 +66,37 @@ requested explicitly, prints a WARNING, and is recorded in the output JSON:
 uv run bci-eeg-to-text split --dataset chisco --level run
 ```
 
+### Splits are symlinks, not copies
+
+The split is materialised as a **tree of relative symlinks**, so you can see
+which recordings belong to which part with `ls` instead of decoding a manifest:
+
+```
+splits/train/sub-04 -> ../../bci-eeg/ds005170/sub-04
+splits/test/sub-01  -> ../../bci-eeg/ds005170/sub-01
+```
+
+Copying is not an option here — the corpora are 419 GB against ~15 GB free — and
+a JSON manifest alone is opaque. Symlinks cost no space (16 KB for a merged
+14-subject split, 620 KB at run level) and the targets are always **relative**,
+so the tree still resolves after the dataset and split move together.
+
+A `split.json` manifest is written alongside the tree for tooling.
+
+### Data location is configuration
+
+| setting | env | default | meaning |
+| --- | --- | --- | --- |
+| `--data-root` | `EEG_TEXT_BCI_DATA_ROOT` | `eeg-text-bci-data` | directory containing the corpora |
+| `--data-subdir` | `EEG_TEXT_BCI_DATA_SUBDIR` | `bci-eeg` | corpus subdirectory |
+| `--data-writable` | `EEG_TEXT_BCI_DATA_WRITABLE` | `false` | may splits be written inside the root? |
+
+`--data-subdir` exists because the corpus directory name is not ours to assume;
+it was previously hard-coded. `--data-writable` defaults to **false** because the
+corpora are normally a read-only mount: splits then go to the current directory
+and nothing under the dataset root is touched. If you set it on a read-only
+mount the error names the flag to drop rather than raising a bare `OSError`.
+
 The two datasets both use bare `sub-NN` ids, so merged mode namespaces them
 (`chisco:sub-01`, `chineseeeg:sub-04`); without that they would collide.
 
@@ -90,6 +121,7 @@ split_data_N.xlsx ──────────┘
 
 | Module | Responsibility |
 | --- | --- |
+| `dataconfig.py` | dataset location resolution, symlinked split materialisation |
 | `backbones.py` | interchangeable encoders (`scratch`, `bert-ctc`, NeuroLM modes) |
 | `neurolm.py` | loading NeuroLM components and checkpoints |
 | `neurolm_native.py` | native NeuroLM tokenizer (patch embed, transformer, VQ) |
