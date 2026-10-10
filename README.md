@@ -90,6 +90,9 @@ split_data_N.xlsx ──────────┘
 
 | Module | Responsibility |
 | --- | --- |
+| `backbones.py` | interchangeable encoders (`scratch`, `bert-ctc`, NeuroLM modes) |
+| `neurolm.py` | loading NeuroLM components and checkpoints |
+| `neurolm_native.py` | native NeuroLM tokenizer (patch embed, transformer, VQ) |
 | `sources.py` | `DatasetSource` protocol, registry, `participants.tsv` parsing |
 | `chineseeeg.py` | ds004952 reader: events, row intervals, novel text, header repair |
 | `chisco.py` | ds005170 reader: reward-pulse recovery |
@@ -102,6 +105,69 @@ split_data_N.xlsx ──────────┘
 | `decode.py` | greedy / prefix beam search, CER, sentence accuracy |
 | `train.py` | training and evaluation loops |
 | `cli.py` | `prepare`, `split`, `inspect`, `train`, `evaluate` |
+
+## Training modes
+
+The encoder is interchangeable; the CTC loss, decoder and metrics are shared.
+`--mode` selects one:
+
+| mode | encoder | typical use |
+| --- | --- | --- |
+| `scratch` | strided conv encoder | baseline, no downloads |
+| `bert-ctc` | pretrained HuggingFace BERT + CTC head | reuse language representations |
+| `neurolm-sft` | full [NeuroLM](https://github.com/935963004/NeuroLM) model | supervised fine-tuning |
+| `neurolm-adapter` | HuggingFace causal LM + adapter | bridge a NeuroProcessor to an LM |
+
+```bash
+# baseline
+uv run bci-eeg-to-text train --cache cache/trials --out runs/scratch --mode scratch
+
+# pretrained BERT with the backbone frozen: only the adapter and head train
+uv run bci-eeg-to-text train --cache cache/trials --out runs/bert \
+  --mode bert-ctc --pretrained bert-base-chinese --freeze-backbone
+
+# fine-tune the whole NeuroLM model
+uv run bci-eeg-to-text train --cache cache/trials --out runs/neurolm-sft \
+  --mode neurolm-sft --lm-name gpt2
+
+# causal LM + adapter, training our own NeuroProcessor from scratch
+uv run bci-eeg-to-text train --cache cache/trials --out runs/adapter \
+  --mode neurolm-adapter --lm-name gpt2 --processor scratch
+
+# same, but reusing a pretrained NeuroProcessor (NeuroLM's own recipe)
+uv run bci-eeg-to-text train --cache cache/trials --out runs/adapter-pre \
+  --mode neurolm-adapter --lm-name gpt2 --processor pretrained \
+  --pretrained checkpoints/VQ.pt
+```
+
+### Why these work the way they do
+
+**EEG has no token ids.** For `bert-ctc` the signal is projected into BERT's
+hidden space and passed as `inputs_embeds`, so the entire pretrained transformer
+stays usable while only a small input adapter and the CTC head need training.
+`--freeze-backbone` then trains a small fraction of parameters (9.8% in a smoke
+test: 38,752 frozen of 111,649).
+
+**BERT has a fixed context length.** Long trials exceed `max_position_embeddings`,
+so the convolutional front-end pools adaptively to fit, and the CTC length
+mapping mirrors that same arithmetic. Verified exact at 800/1135/8000/64000
+samples, all within the 512-frame limit.
+
+**NeuroLM's NeuroProcessor is its vector-quantized EEG tokenizer.** In
+`neurolm-adapter` the adapter is the analogue of NeuroLM's own
+`encode_transform_layer`: a small learned map from processor features into the
+language model's embedding space. `--processor scratch` trains that processor
+from scratch instead of reusing the released weights.
+
+Training prints the parameter budget so the effect of freezing is visible:
+
+```
+device=cpu mode=bert-ctc trials=559 channels=128 classes=1057
+parameters: total=111,649 trainable=72,897 (65.3%) frozen=38,752
+```
+
+Checkpoints record the mode and backbone options, so `evaluate` rebuilds the
+same architecture rather than guessing.
 
 ## Setup
 
@@ -144,7 +210,9 @@ uv run pytest -q                     # includes dataset-backed tests
 ```
 
 Real-data tests are marked `realdata` and skip automatically when the dataset is
-not mounted.
+not mounted. CI runs with `HF_HUB_OFFLINE=1`; the backbone tests build tiny
+checkpoints locally rather than downloading them, and CI publishes coverage
+(terminal, XML and HTML) plus JUnit results as artifacts on every run.
 
 ## Design notes
 
