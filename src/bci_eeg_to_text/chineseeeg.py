@@ -186,6 +186,91 @@ def read_segmented_novel(path: str | Path) -> list[str]:
     return texts
 
 
+def fix_vhdr_reference(text: str) -> str:
+    """Correct the upstream ``GranettDream`` typo in a BrainVision sidecar.
+
+    Six of the dataset's sessions ship sidecars pointing at
+    ``..._GranettDream_...`` files while the files on disk are
+    ``..._GarnettDream_...`` -- 126 of 168 headers, i.e. the entire GarnettDream
+    session. BrainVision resolves those paths literally, so MNE cannot open them.
+
+    This is a pure string fix, kept separate from file handling so it can be
+    tested without touching the read-only dataset.
+    """
+    return text.replace("GranettDream", "GarnettDream")
+
+
+def references_missing_files(vhdr: Path, text: str) -> bool:
+    """True if any ``DataFile``/``MarkerFile`` named in ``text`` is absent."""
+    for line in text.splitlines():
+        match = re.match(r"(DataFile|MarkerFile)=(.+)", line.strip())
+        if match and not (vhdr.parent / match.group(2).strip()).exists():
+            return True
+    return False
+
+
+def readable_vhdr(vhdr: Path, work_dir: Path) -> tuple[Path, bool]:
+    """Return a header path MNE can open, repairing broken references.
+
+    Returns ``(path, repaired)``. The dataset is read-only, and BrainVision
+    resolves ``DataFile``/``MarkerFile`` relative to the header, so a corrected
+    header cannot be written beside the data. Instead we build a mirror inside
+    ``work_dir`` that holds a corrected header plus symlinks to the real
+    ``.eeg``/``.vmrk`` files. Nothing under the dataset root is modified.
+
+    The mirror path includes the subject so runs from different participants do
+    not collide, and symlinks are created with ``lexists`` semantics because a
+    dangling link still occupies the name.
+    """
+    try:
+        text = vhdr.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return vhdr, False
+    if not references_missing_files(vhdr, text):
+        return vhdr, False
+
+    fixed = fix_vhdr_reference(text)
+    if references_missing_files(vhdr, fixed):
+        return vhdr, False
+
+    try:
+        # Keep the subject and session in the path: two participants can have
+        # identically named runs.
+        mirror = (
+            work_dir / vhdr.parent.parent.parent.name / vhdr.parent.parent.name / vhdr.parent.name
+        )
+        mirror.mkdir(parents=True, exist_ok=True)
+        wanted_names: list[tuple[str, Path]] = []
+        for line in fixed.splitlines():
+            match = re.match(r"(DataFile|MarkerFile)=(.+)", line.strip())
+            if not match:
+                continue
+            wanted = vhdr.parent / match.group(2).strip()
+            if not wanted.exists():
+                # The header asks for the misspelled name; link it to the file
+                # that actually exists under the correct spelling.
+                corrected = vhdr.parent / wanted.name.replace("GranettDream", "GarnettDream")
+                if not corrected.exists():
+                    return vhdr, False
+                wanted = corrected
+            wanted_names.append((match.group(2).strip(), wanted))
+            wanted_names.append((wanted.name, wanted))
+
+        for name, source in wanted_names:
+            link = mirror / name
+            if link.is_symlink() or link.exists():
+                continue
+            # Absolute target: a relative link would resolve against the mirror
+            # directory, not the dataset.
+            link.symlink_to(source.resolve())
+
+        repaired = mirror / vhdr.name
+        repaired.write_text(fixed, encoding="utf-8")
+    except OSError:
+        return vhdr, False
+    return repaired, True
+
+
 @register_source
 @dataclass
 class ChineseEEGSource:
@@ -199,6 +284,8 @@ class ChineseEEGSource:
     decimate: int = 4
     #: Sampling rate of the preprocessed data; used for duration checks.
     sample_rate_hz: float = 256.0
+    #: Writable scratch space for repaired BrainVision headers.
+    scratch_dir: Path = Path(".cache/vhdr_repair")
 
     def root(self) -> Path:
         return Path(self.data_root)
@@ -206,6 +293,14 @@ class ChineseEEGSource:
     def sample_rate(self) -> float:
         """Sampling rate of the preprocessed recordings, in Hz."""
         return float(self.sample_rate_hz)
+
+    def work_dir(self) -> Path:
+        """Scratch directory for repaired headers.
+
+        The dataset is read-only, so corrected BrainVision headers are mirrored
+        here together with symlinks to the real data files.
+        """
+        return Path(self.scratch_dir)
 
     def preproc_root(self) -> Path:
         """Directory holding the preprocessed variant actually present."""
@@ -294,7 +389,10 @@ class ChineseEEGSource:
                 "(see issue #4)."
             )
 
-        raw = mne.io.read_raw_brainvision(str(run.path), preload=True, verbose="ERROR")
+        # The GarnettDream sidecars reference misspelled filenames, so open a
+        # repaired copy when necessary rather than failing on a dataset typo.
+        vhdr, repaired = readable_vhdr(run.path, self.work_dir())
+        raw = mne.io.read_raw_brainvision(str(vhdr), preload=True, verbose="ERROR")
         data = raw.get_data()
         segments = [
             Segment(index=i, start_sample=start, stop_sample=stop, text=text)
@@ -323,6 +421,7 @@ class ChineseEEGSource:
                 "task": np.array("reading"),
                 "dataset": np.array(self.name),
                 "alignment": np.array("stimulus-marker"),
+                "vhdr_repaired": np.array(repaired),
             },
         )
         return ExtractionReport(

@@ -309,3 +309,81 @@ class TestChineseEEGRealAlignment:
             assert len(intervals) == len(texts)
             corr = duration_length_correlation(intervals, texts, 256.0)
             assert corr >= MIN_DURATION_LENGTH_CORRELATION, f"{run.run}: corr={corr}"
+
+
+class TestVhdrRepair:
+    """The GarnettDream sidecars reference filenames that do not exist.
+
+    Six of the dataset's sessions ship headers pointing at ``..._GranettDream_``
+    while the files on disk are ``..._GarnettDream_`` (one "t"). BrainVision
+    resolves those paths literally, so MNE cannot open 126 of 168 headers.
+    """
+
+    def test_fix_corrects_the_typo(self) -> None:
+        from bci_eeg_to_text.chineseeeg import fix_vhdr_reference
+
+        text = "DataFile=sub-04_ses-GranettDream_task-reading_run-01_eeg.eeg\n"
+        assert fix_vhdr_reference(text) == (
+            "DataFile=sub-04_ses-GarnettDream_task-reading_run-01_eeg.eeg\n"
+        )
+
+    def test_fix_leaves_correct_text_untouched(self) -> None:
+        from bci_eeg_to_text.chineseeeg import fix_vhdr_reference
+
+        text = "DataFile=sub-04_ses-GarnettDream_task-reading_run-01_eeg.eeg\n"
+        assert fix_vhdr_reference(text) == text
+
+    def test_detects_missing_reference(self, tmp_path: Path) -> None:
+        from bci_eeg_to_text.chineseeeg import references_missing_files
+
+        vhdr = tmp_path / "h.vhdr"
+        vhdr.write_text("x")
+        assert references_missing_files(vhdr, "DataFile=absent.eeg\n")
+
+    def test_present_reference_is_reported_ok(self, tmp_path: Path) -> None:
+        from bci_eeg_to_text.chineseeeg import references_missing_files
+
+        (tmp_path / "present.eeg").write_bytes(b"x")
+        vhdr = tmp_path / "h.vhdr"
+        vhdr.write_text("x")
+        assert not references_missing_files(vhdr, "DataFile=present.eeg\n")
+
+    def test_readable_vhdr_repairs_via_mirror(self, tmp_path: Path) -> None:
+        """A read-only dataset must still be readable through a mirror."""
+        from bci_eeg_to_text.chineseeeg import readable_vhdr
+
+        data = tmp_path / "sub-04" / "ses-GarnettDream" / "eeg"
+        data.mkdir(parents=True)
+        (data / "sub-04_ses-GarnettDream_task-reading_run-01_eeg.eeg").write_bytes(b"data")
+        (data / "sub-04_ses-GarnettDream_task-reading_run-01_eeg.vmrk").write_text("m")
+        vhdr = data / "sub-04_ses-GarnettDream_task-reading_run-01_eeg.vhdr"
+        vhdr.write_text(
+            "DataFile=sub-04_ses-GranettDream_task-reading_run-01_eeg.eeg\n"
+            "MarkerFile=sub-04_ses-GranettDream_task-reading_run-01_eeg.vmrk\n"
+        )
+
+        repaired, changed = readable_vhdr(vhdr, tmp_path / "work")
+        assert changed is True
+        assert repaired != vhdr
+        text = repaired.read_text()
+        assert "GranettDream" not in text
+        # The mirror must actually resolve to the real data.
+        assert (repaired.parent / "sub-04_ses-GarnettDream_task-reading_run-01_eeg.eeg").exists()
+
+    def test_readable_vhdr_is_a_noop_when_fine(self, tmp_path: Path) -> None:
+        from bci_eeg_to_text.chineseeeg import readable_vhdr
+
+        (tmp_path / "a.eeg").write_bytes(b"x")
+        vhdr = tmp_path / "a.vhdr"
+        vhdr.write_text("DataFile=a.eeg\n")
+        path, changed = readable_vhdr(vhdr, tmp_path / "work")
+        assert (path, changed) == (vhdr, False)
+
+    def test_readable_vhdr_gives_up_when_unfixable(self, tmp_path: Path) -> None:
+        """If the corrected name is also absent, return the original unchanged."""
+        from bci_eeg_to_text.chineseeeg import readable_vhdr
+
+        vhdr = tmp_path / "a.vhdr"
+        vhdr.write_text("DataFile=sub-01_ses-GranettDream_missing.eeg\n")
+        path, changed = readable_vhdr(vhdr, tmp_path / "work")
+        assert (path, changed) == (vhdr, False)
