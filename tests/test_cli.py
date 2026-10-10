@@ -390,6 +390,21 @@ class TestSplitCommand:
         assert payload["subject_level"] is True
         assert set(payload["parts"]) == {"train", "test"}
 
-    def test_rejects_malformed_ratios(self) -> None:
+    def test_rejects_malformed_ratios(self, tmp_path: Path) -> None:
+        """Must fail identically whether or not the dataset is mounted.
+
+        Validation therefore happens before the data root is touched; otherwise
+        an unmounted dataset would mask the bad argument.
+        """
         with pytest.raises(SystemExit, match="expected name=int"):
-            main(["split", "--dataset", "chisco", "--ratios", "bogus"])
+            main(
+                [
+                    "split",
+                    "--dataset",
+                    "chisco",
+                    "--ratios",
+                    "bogus",
+                    "--data-root",
+                    str(tmp_path / "absent"),
+                ]
+            )

@@ -117,6 +117,10 @@ def cmd_split(args: argparse.Namespace) -> int:
     from bci_eeg_to_text.sources import get_source, subjects_for_split
     from bci_eeg_to_text.splits import make_splits, validate_subject_disjoint
 
+    # Validate arguments before touching the filesystem: a malformed --ratios
+    # must fail the same way whether or not the dataset happens to be mounted.
+    ratios = _parse_ratios(args.ratios, args.dataset)
+
     names = _resolve_dataset_names(args.dataset)
     sources = [
         get_source(name, data_root=Path(args.data_root) / _root_suffix(name)) for name in names
@@ -126,7 +130,6 @@ def cmd_split(args: argparse.Namespace) -> int:
         print("no participants found; is the dataset mounted?", file=sys.stderr)
         return 1
 
-    ratios = _parse_ratios(args.ratios, args.dataset)
     runs_per_subject = None
     if args.level == "run":
         runs_per_subject = {}
