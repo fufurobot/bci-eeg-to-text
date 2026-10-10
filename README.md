@@ -122,6 +122,8 @@ split_data_N.xlsx ──────────┘
 | Module | Responsibility |
 | --- | --- |
 | `dataconfig.py` | dataset location resolution, symlinked split materialisation |
+| `splittree.py` | reading split trees; leakage detection |
+| `splitdata.py` | turning a split tree into training datasets |
 | `backbones.py` | interchangeable encoders (`scratch`, `bert-ctc`, NeuroLM modes) |
 | `neurolm.py` | loading NeuroLM components and checkpoints |
 | `neurolm_native.py` | native NeuroLM tokenizer (patch embed, transformer, VQ) |
@@ -150,27 +152,48 @@ The encoder is interchangeable; the CTC loss, decoder and metrics are shared.
 | `neurolm-sft` | full [NeuroLM](https://github.com/935963004/NeuroLM) model | supervised fine-tuning |
 | `neurolm-adapter` | HuggingFace causal LM + adapter | bridge a NeuroProcessor to an LM |
 
+Training reads a **split tree**, so the split actually governs what is trained
+on. Recordings are extracted on demand into `<out>/cache/<part>`, keyed by the
+resolved source path, so there is no separate preparation step to keep in sync.
+
 ```bash
-# baseline
-uv run bci-eeg-to-text train --cache cache/trials --out runs/scratch --mode scratch
+# 1. define the split (subject level, sex balanced) as a symlink tree
+uv run bci-eeg-to-text split --dataset merged --link
+
+# 2. train: --split is all the trainer needs
+uv run bci-eeg-to-text train --split splits --out runs/scratch --mode scratch
 
 # pretrained BERT with the backbone frozen: only the adapter and head train
-uv run bci-eeg-to-text train --cache cache/trials --out runs/bert \
+uv run bci-eeg-to-text train --split splits --out runs/bert \
   --mode bert-ctc --pretrained bert-base-chinese --freeze-backbone
 
 # fine-tune the whole NeuroLM model
-uv run bci-eeg-to-text train --cache cache/trials --out runs/neurolm-sft \
+uv run bci-eeg-to-text train --split splits --out runs/neurolm-sft \
   --mode neurolm-sft --lm-name gpt2
 
 # causal LM + adapter, training our own NeuroProcessor from scratch
-uv run bci-eeg-to-text train --cache cache/trials --out runs/adapter \
+uv run bci-eeg-to-text train --split splits --out runs/adapter \
   --mode neurolm-adapter --lm-name gpt2 --processor scratch
 
 # same, but reusing a pretrained NeuroProcessor (NeuroLM's own recipe)
-uv run bci-eeg-to-text train --cache cache/trials --out runs/adapter-pre \
+uv run bci-eeg-to-text train --split splits --out runs/adapter-pre \
   --mode neurolm-adapter --lm-name gpt2 --processor pretrained \
   --pretrained checkpoints/VQ.pt
+
+# evaluate on the held-out part of the same split
+uv run bci-eeg-to-text evaluate --split splits --checkpoint runs/bert/last.pt
 ```
+
+**Subject-level and run-level splits behave identically here.** The trainer
+consumes whichever tree it is given; the difference is only what the links point
+at. That is the payoff of materialising splits as links rather than as a
+manifest that training would have to interpret.
+
+Every load calls `check_no_leakage()`, which fails if a recording resolves into
+two parts. A trial shared between train and test inflates scores while looking
+like a good model, so it is an error rather than a warning. `--cache` still
+exists for quick experiments but carries no split information, so validation
+falls back to a holdout from the training data and says so.
 
 ### Why these work the way they do
 
