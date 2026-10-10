@@ -39,7 +39,37 @@ jobs:
           uv pip install mne pyedflib pytest pytest-cov
           uv pip install -e . --no-deps
 
-      # Real-data tests need the Chisco dataset (an external ~143 GB mount).
-      # They skip themselves when it is absent, which is the case in CI.
-      - name: Test
-        run: uv run pytest -q -m "not realdata"
+      # Real-data tests need the external EEG mounts (~419 GB). They skip
+      # themselves when absent, which is the case in CI.
+      - name: Test with coverage
+        run: |
+          uv run pytest -q -m "not realdata" \
+            --cov=src/bci_eeg_to_text \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-report=html:htmlcov \
+            --junitxml=junit.xml
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          {
+            echo "## Coverage"
+            echo
+            echo '```'
+            uv run coverage report --skip-covered
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Keep the reports even when tests fail, so a regression can be
+      # diagnosed from the artifacts rather than re-run locally.
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            coverage.xml
+            junit.xml
+            htmlcov/
+          if-no-files-found: warn

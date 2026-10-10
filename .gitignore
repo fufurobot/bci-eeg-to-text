@@ -221,3 +221,9 @@ __marimo__/
 eeg-text-bci-data
 notebooks/data
 .cache/
+
+# Test/coverage artifacts
+coverage.xml
+junit.xml
+htmlcov/
+.coverage
