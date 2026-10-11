@@ -23,15 +23,18 @@ WORKDIR /home/jovyan/bci-eeg-to-text
 # Dependencies first, so editing source does not invalidate the cached layer.
 COPY pyproject.toml README.md ./
 
+# --no-config is required: pyproject.toml pins torch to the CUDA index via
+# [tool.uv.sources] for local GPU work, and that pin overrides --index-url, so
+# without it this "CPU" install would fetch several GB of unusable CUDA wheels.
 RUN uv venv --python 3.13 && \
-    uv pip install --index-url https://download.pytorch.org/whl/cpu torch && \
-    uv pip install mne pyedflib transformers jupyterlab ipykernel
+    uv pip install --no-config --index-url https://download.pytorch.org/whl/cpu torch && \
+    uv pip install --no-config mne pyedflib transformers jupyterlab ipykernel
 
 COPY . .
 
 # Editable install without dependencies: resolving them here would replace the
 # CPU torch above with the CUDA build the lockfile pins.
-RUN uv pip install -e . --no-deps
+RUN uv pip install --no-config -e . --no-deps
 
 # Run as an unprivileged user, as Binder expects.
 RUN useradd -m -u 1000 jovyan && chown -R jovyan:jovyan /home/jovyan
