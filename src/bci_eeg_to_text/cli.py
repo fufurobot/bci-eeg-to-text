@@ -16,7 +16,15 @@ from bci_eeg_to_text.dataconfig import (
     DEFAULT_DATA_SUBDIR,
     DataConfig,
 )
-from bci_eeg_to_text.leakage import LEAKAGE_MODES, describe_mode
+from bci_eeg_to_text.leakage import (
+    DEFAULT_SUBJECT_MODE,
+    DOCUMENT_DATASETS,
+    LEAKAGE_MODES,
+    SUBJECT_MODES,
+    LeakageError,
+    describe_subject_mode,
+    describe_text_mode,
+)
 from bci_eeg_to_text.textstructure import DEFAULT_LEAKAGE_MODE
 
 
@@ -102,11 +110,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_split.set_defaults(link=True)
     p_split.add_argument(
+        "--subject-mode",
+        default=DEFAULT_SUBJECT_MODE,
+        choices=list(SUBJECT_MODES),
+        help=(
+            "subject leakage policy: "
+            + "; ".join(f"{m} = {describe_subject_mode(m)}" for m in SUBJECT_MODES)
+        ),
+    )
+    p_split.add_argument(
         "--leakage",
         default=DEFAULT_LEAKAGE_MODE,
         choices=list(LEAKAGE_MODES),
         help=(
-            "text leakage policy: " + "; ".join(f"{m} = {describe_mode(m)}" for m in LEAKAGE_MODES)
+            "text leakage policy: "
+            + "; ".join(f"{m} = {describe_text_mode(m)}" for m in LEAKAGE_MODES)
         ),
     )
     p_split.add_argument(
@@ -254,20 +272,66 @@ def _extract_split_part(tree, part: str, args: argparse.Namespace) -> tuple[list
     return extract_part(tree, part, cache_dir / part, decimate=args.decimate)
 
 
-def _assess_text_leakage(sources, mode: str, config) -> object:
-    """Group every row by paragraph/article and report cross-part leakage.
+def _evaluate_leakage(split, sources, participants, args):
+    """Build the leakage matrix for a computed split.
 
-    Rows are located inside the source novels by string search, so the report
-    states how much text structure was actually recovered rather than implying
-    full coverage.
+    Subject, text, sex and run axes are evaluated together so the report names
+    exactly which axis leaks. Chisco contributes no paragraph/article structure,
+    so text modes above ``row`` are only meaningful for ChineseEEG.
+    """
+    from bci_eeg_to_text.leakage import evaluate_matrix, summarize_coverage
+
+    # At run level the entries are "subject/run", so the subject axis must look
+    # at the subject half while the run axis uses the whole entry. Treating the
+    # full entry as a subject made one participant look like eighteen.
+    by_id = {p.subject_id: p for p in participants}
+    subject_parts: dict[str, list[str]] = {}
+    run_parts: dict[str, list[str]] = {}
+    for part, entries in split.parts.items():
+        if split.subject_level:
+            subject_parts[part] = list(entries)
+        else:
+            run_parts[part] = list(entries)
+            seen: dict[str, None] = {}
+            for entry in entries:
+                seen.setdefault(entry.split("/")[0], None)
+            subject_parts[part] = list(seen)
+
+    units = _collect_text_units(sources)
+    if units:
+        print(f"text coverage: {summarize_coverage(units, args.leakage)}")
+    text_parts: dict[str, list] = {}
+    if units:
+        from bci_eeg_to_text.leakage import assign_units_to_parts
+
+        ratio_keys = {part: 1 for part in split.parts}
+        assigned = assign_units_to_parts(
+            units, mode=args.leakage, ratios=ratio_keys, seed=args.seed
+        )
+        text_parts = {part: list(group) for part, group in assigned.items()}
+
+    # A single-subject split has nothing to balance, so reporting sex imbalance
+    # there would be noise rather than signal.
+    single = args.subject_mode == "one_subject"
+    return evaluate_matrix(
+        subject_parts=subject_parts,
+        text_parts=text_parts,
+        participants=by_id,
+        run_parts=run_parts,
+        subject_mode=args.subject_mode,
+        text_mode=args.leakage,
+        check_sex=not single,
+    )
+
+
+def _collect_text_units(sources) -> list:
+    """Every labelled row across the corpora that have source documents.
+
+    Rows are located inside the novels by string search, so the caller can
+    report how much structure was recovered rather than implying full coverage.
     """
     from bci_eeg_to_text.chineseeeg import read_segmented_novel
-    from bci_eeg_to_text.leakage import (
-        check_leakage,
-        describe_mode,
-        summarize_coverage,
-        units_from_labels,
-    )
+    from bci_eeg_to_text.leakage import units_from_labels
     from bci_eeg_to_text.textstructure import (
         TextStructureError,
         find_source_documents,
@@ -275,59 +339,37 @@ def _assess_text_leakage(sources, mode: str, config) -> object:
         read_document,
     )
 
-    collected: dict[str, list] = {}
+    units: list = []
     for source in sources:
-        if source.name != "chineseeeg":
-            # Chisco stimuli are short standalone sentences with no surrounding
-            # document, so only row-level identity is available there.
+        if source.name not in DOCUMENT_DATASETS:
+            # Chisco stimuli are standalone sentences with no surrounding
+            # document, so only row-level identity exists there.
             continue
-        docs = find_source_documents(source.root())
-        for novel, path in docs.items():
+        for novel, path in find_source_documents(source.root()).items():
             try:
                 document = read_document(path, novel)
             except TextStructureError:
                 continue
-            # Every participant read the SAME novel, so rows must be collected
-            # per document, not per (subject, run): otherwise the same sentence
-            # is counted once per participant and inflates the totals by ~10x.
-            #
-            # Only label files that actually belong to THIS document. Labelling
-            # every run against every novel would credit one novel with the
-            # other's rows and halve the apparent coverage.
+            # Every participant read the SAME novel, so rows are collected per
+            # document, not per (subject, run), or each sentence is counted once
+            # per participant and totals inflate ~10x.
             seen_files: set[str] = set()
             for run in source.runs():
                 if novel not in (run.session or ""):
                     continue
                 paths = [p for p in source.novel_paths(run) if "_display" not in p.name]
-                if not paths:
+                if not paths or paths[0].name in seen_files:
                     continue
-                key = paths[0].name
-                if key in seen_files:
-                    continue
-                seen_files.add(key)
+                seen_files.add(paths[0].name)
                 try:
                     texts = read_segmented_novel(paths[0])
                 except Exception:  # noqa: BLE001
                     continue
-                # Each run file starts partway through the novel, so the search
-                # cursor must restart or later files locate almost nothing.
+                # Each run file restarts partway through the novel, so the
+                # search cursor must reset or later files locate nothing.
                 document.reset_cursor()
-                collected.setdefault(novel, []).extend(label_rows(texts, document))
-
-    if not collected:
-        print(f"leakage: {describe_mode(mode)} (no source text found to check)")
-        return None
-
-    all_units = units_from_labels([label for labels in collected.values() for label in labels])
-    print(f"leakage: {describe_mode(mode)}")
-    print(f"  {summarize_coverage(all_units, mode)}")
-    report = check_leakage({mode: all_units}, mode)
-    if report.unplaced_rows:
-        print(
-            f"  {report.unplaced_rows} rows could not be located in the source text; "
-            "they fall back to row identity and cannot leak by paragraph/article"
-        )
-    return report
+                units.extend(units_from_labels(label_rows(texts, document), source.name))
+    return units
 
 
 def _data_from_split(args: argparse.Namespace):
@@ -414,13 +456,40 @@ def cmd_split(args: argparse.Namespace) -> int:
         print("no participants found; is the dataset mounted?", file=sys.stderr)
         return 1
 
+    chosen = None
+    if args.subject_mode == "one_subject":
+        # Pick one participant at random and split only its runs. Sex balance is
+        # deliberately not considered: with one subject there is nothing to
+        # balance, and the point is a within-participant experiment.
+        from bci_eeg_to_text.leakage import pick_one_subject
+
+        try:
+            chosen = pick_one_subject(participants, text_mode=args.leakage, seed=args.seed)
+        except LeakageError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        participants = [chosen]
+        args.level = "run"
+        print(
+            f"subject mode one_subject: using {chosen.subject_id} only; "
+            f"all parts share this participant, so scores are within-participant "
+            f"and not a generalisation estimate"
+        )
+
     runs_per_subject = None
     if args.level == "run":
+        wanted = {p.subject_id for p in participants}
         runs_per_subject = {}
         for source in sources:
             for run in source.runs():
                 key = f"{source.name}:{run.subject_id}"
-                runs_per_subject.setdefault(key, []).append(run.run)
+                if key not in wanted:
+                    continue
+                # Session-qualify the label: a run number repeats across
+                # sessions (sub-04 has run-01 in two of them), so a bare
+                # "run-01" denotes two recordings and lands in two parts.
+                label = f"{run.session}/{run.run}" if run.session else run.run
+                runs_per_subject.setdefault(key, []).append(label)
 
     split = make_splits(
         participants,
@@ -431,12 +500,11 @@ def cmd_split(args: argparse.Namespace) -> int:
     )
     validate_subject_disjoint(split, participants)
 
-    # Text leakage is checked independently of participant leakage: two parts
-    # can hold disjoint subjects yet share the prose they were reading, letting
-    # a model memorise text rather than learn to decode EEG.
-    leakage_report = None
-    if args.leakage != "none":
-        leakage_report = _assess_text_leakage(sources, args.leakage, config)
+    # Evaluate every leakage axis and print the whole matrix. It is printed
+    # unconditionally: silence would be indistinguishable from "no leakage",
+    # which is precisely the confusion the matrix exists to remove.
+    matrix = _evaluate_leakage(split, sources, participants, args)
+    print(matrix.describe())
 
     by_id = {p.subject_id: p for p in participants}
     print(f"dataset: {args.dataset}  level: {args.level}  ratios: {ratios}  seed: {args.seed}")
@@ -456,17 +524,6 @@ def cmd_split(args: argparse.Namespace) -> int:
             label = entry if not split.subject_level else subject
             print(f"  {label} ({by_id[subject].sex or 'sex unknown'})")
 
-    if leakage_report is not None and not leakage_report.ok:
-        # Participant-level splitting divides subjects, not documents, so it
-        # cannot by itself remove text overlap. Report it honestly instead of
-        # implying the constraint holds.
-        print(
-            f"  NOTE: {len(leakage_report.violations)} text groups span parts at "
-            f"{args.leakage} level. Dividing subjects cannot remove text overlap; "
-            "use --leakage none to silence this, or partition by document.",
-            file=sys.stderr,
-        )
-
     # A run-level split is legitimate but is not a generalisation estimate, so
     # say so loudly rather than letting the number be misread.
     for warning in split.warnings:
@@ -485,9 +542,8 @@ def cmd_split(args: argparse.Namespace) -> int:
                 corpus_paths=corpus_paths,
                 cwd=Path.cwd(),
                 leakage_mode=args.leakage,
-                leakage_violations=(
-                    len(leakage_report.violations) if leakage_report is not None else None
-                ),
+                leakage_violations=len(matrix.text.violations),
+                subject_mode=args.subject_mode,
             )
         except DataAccessError as exc:
             print(f"error: {exc}", file=sys.stderr)
