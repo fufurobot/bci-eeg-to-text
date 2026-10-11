@@ -1,5 +1,9 @@
 # bci-eeg-to-text
 
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/fufurobot/bci-eeg-to-text)
+[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/fufurobot/bci-eeg-to-text/main?filepath=notebooks)
+[![CI](https://github.com/fufurobot/bci-eeg-to-text/actions/workflows/ci.yml/badge.svg)](https://github.com/fufurobot/bci-eeg-to-text/actions/workflows/ci.yml)
+
 Training an EEG-to-text decoder with **CTC loss** over EEG-text datasets.
 
 The architecture is deliberately dataset-agnostic: a dataset is only a source of
@@ -13,6 +17,34 @@ wired up:
 | [ds005170](https://doi.org/10.18112/openneuro.ds005170.v1.1.2) Chisco | imagined speech | recovered from reward pulses | 4 (2F/2M) | 168 |
 
 Both are 128-channel EEG. `--dataset merged` trains on both at once.
+
+## Try it without installing anything
+
+| | what you get |
+| --- | --- |
+| [**Codespaces**](https://codespaces.new/fufurobot/bci-eeg-to-text) | full environment, `uv`, tests, CLI |
+| [**Binder**](https://mybinder.org/v2/gh/fufurobot/bci-eeg-to-text/main?filepath=notebooks) | a notebook server, no sign-in |
+
+Both build a **CPU-only** environment (~1.2 GB). The default local install uses
+CUDA wheels, which are 5.7 GB and unusable without a GPU, so a hosted image
+would otherwise be mostly dead weight; `.devcontainer/setup.sh` and
+`binder/Dockerfile` install torch from the PyTorch CPU index instead.
+
+In Codespaces:
+
+```bash
+uv run pytest -q -m "not realdata"     # 400+ tests, no dataset needed
+uv run bci-eeg-to-text --help
+```
+
+The EEG corpora are **not** included — they are 419 GB across two OpenNeuro
+datasets — so the dataset-backed tests skip themselves. To use real data, fetch
+it with DataLad and point the tools at it:
+
+```bash
+export EEG_TEXT_BCI_DATA_ROOT=/path/to/bci-eeg
+uv run bci-eeg-to-text split --dataset chineseeeg --link
+```
 
 ## Alignment is the hard part, and it differs per dataset
 
