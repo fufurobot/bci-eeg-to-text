@@ -83,27 +83,68 @@ so the tree still resolves after the dataset and split move together.
 
 A `split.json` manifest is written alongside the tree for tooling.
 
-### Text leakage modes
+### Leakage is a matrix, and it is never silent
 
-Disjoint recordings are not enough: two parts can share the *text* that was
-read, and a model can memorise prose instead of learning to decode EEG.
+Disjoint recordings are not enough. A split can leak along four independent
+axes, and a good-looking score can come from any of them:
+
+| axis | modes |
+| --- | --- |
+| **subject** | `none`, `one_subject`, `cross_subject` (**default**) |
+| **text** | `none`, `row` (**default**), `paragraph`, `article` |
+| **sex** | balanced — any `|F-M| > 0` inside a part is flagged |
+| **run** | no recording may appear in two parts |
 
 ```bash
 uv run bci-eeg-to-text split --dataset chineseeeg --leakage article
+uv run bci-eeg-to-text split --dataset chineseeeg --subject-mode one_subject
 ```
 
-| mode | guarantee |
-| --- | --- |
-| `none` | nothing enforced; an upper bound |
-| `row` | no identical row in two parts (**default**) |
-| `paragraph` | no paragraph in two parts |
-| `article` | no chapter in two parts (strictest) |
+The full matrix is printed **unconditionally**, because silence is the danger
+here: "no output" is indistinguishable from "no leakage".
 
-This is possible because rows are **verbatim substrings of the source novels**,
-so each row's position is found by string search and its paragraph and chapter
-follow from that offset. Measured on the real corpus, **99.7% of rows (12,075 of
-12,115)** resolve to a paragraph and an article; the 40 that do not fall back to
-row identity and so can never match a stricter check by accident. The command
+```
+leakage matrix:
+  subject=cross_subject: ok
+  text=paragraph: ok
+  sex=balanced: ok
+  run=disjoint: ok
+  no enforced axis leaks
+```
+
+An unenforced axis is marked `!` and the report states what is left unchecked:
+
+```
+! subject=none: NOT ENFORCED (upper bound)
+! text=none: NOT ENFORCED (upper bound)
+  unenforced: subject, text -- anything on these axes is leaked, results are an upper bound
+```
+
+A violated axis names exactly what leaks, with counts:
+
+```
+  sex=balanced: 2 violation(s)
+      - 'valid' sex imbalance |F-M|=1 (F=1, M=0)
+      - 'test' sex imbalance |F-M|=1 (F=0, M=1)
+```
+
+**Sex imbalance counts as leakage** because a part made up entirely of one sex
+lets a model exploit sex-linked signal structure. Subjects with no recorded sex
+are reported rather than assumed balanced.
+
+**`one_subject`** picks one participant at random (seeded) and splits its runs
+across train/valid/test, deliberately ignoring sex balance since with one subject
+there is nothing to balance. Paragraph and article modes restrict the pick to
+ChineseEEG — the only corpus shipping source documents — so the constraint is
+meaningful rather than vacuous.
+
+### Text leakage modes
+
+This makes `paragraph` and `article` possible: rows are **verbatim substrings of
+the source novels**, so each row's position is found by string search and its
+paragraph and chapter follow from that offset. Measured on the real corpus,
+**99.7% of rows (12,075 of 12,115)** resolve to both; the 40 that do not fall back
+to row identity and so can never match a stricter check by accident. The command
 prints this coverage, so weak structure is visible rather than assumed.
 
 Groups are indivisible: rows of one paragraph travel together, because splitting
