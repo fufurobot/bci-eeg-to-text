@@ -34,9 +34,12 @@ url = "https://download.pytorch.org/whl/cu118"
 
 [dependency-groups]
 dev = [
+    "accelerate>=1.15.0",
+    "mlflow>=3.17.1",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.16.10",
+    "tensorboard>=2.21.0",
 ]
 
 [tool.pytest.ini_options]
