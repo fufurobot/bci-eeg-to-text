@@ -32,13 +32,22 @@ jobs:
 
       # CI has no GPU, so install CPU-only PyTorch instead of the project's
       # default CUDA index. The CUDA wheels are also several GB larger.
+      #
+      # --no-config is required: pyproject.toml pins torch to the CUDA index via
+      # [tool.uv.sources] for local GPU work, and that pin overrides
+      # --index-url. Without it this step silently installed torch 2.7.1+cu118,
+      # so CI was downloading 863 MB of CUDA libraries it cannot use and was not
+      # testing the CPU build its comment promised.
       - name: Install dependencies
         run: |
           uv venv
-          uv pip install --index-url https://download.pytorch.org/whl/cpu torch
-          uv pip install mne pyedflib pytest pytest-cov
-          uv pip install transformers
-          uv pip install -e . --no-deps
+          uv pip install --no-config --index-url https://download.pytorch.org/whl/cpu torch
+          uv pip install --no-config mne pyedflib pytest pytest-cov
+          uv pip install --no-config transformers
+          uv pip install --no-config -e . --no-deps
+          # Record what actually got installed; a mismatch here explains
+          # otherwise inexplicable numerical differences between runs.
+          uv run python -c "import torch, transformers; print('torch', torch.__version__); print('transformers', transformers.__version__)"
 
       # Real-data tests need the external EEG mounts (~419 GB). They skip
       # themselves when absent, which is the case in CI.
