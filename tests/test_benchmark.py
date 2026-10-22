@@ -39,7 +39,8 @@ class FakeEEG:
 
     def forward_logits(self, eeg: torch.Tensor) -> torch.Tensor:
         b, _, t = eeg.shape
-        return torch.randn(b, max(2, t // 32), 5)
+        # 4 classes to match CharTokenizer.build(["你好"]) (blank, unk, 你, 好).
+        return torch.randn(b, max(2, t // 32), 4)
 
     def input_lengths_to_output(self, lengths: torch.Tensor) -> torch.Tensor:
         return (lengths // 32).clamp(min=1)
@@ -132,14 +133,20 @@ class TestRegistry:
 @pytest.mark.skipif(not ECHO_CKPT.exists(), reason="ECHO checkpoint not downloaded")
 class TestEchoOnDisk:
     def test_checkpoint_is_probed_without_importing_missing_code(self) -> None:
-        """ECHO ships weights but not its FAST/EEG2Text code, so probing must
-        read the checkpoint without needing those modules importable."""
+        """ECHO ships weights but not its FAST/EEG2Text code.
+
+        Probing must therefore read the checkpoint without needing those modules
+        importable, succeed in describing its shape, and report *unavailable with
+        a reason* -- the code to instantiate the network genuinely was not
+        downloaded, so claiming it is runnable would be a fabrication.
+        """
         from bci_eeg_to_text.benchmark import probe
 
         status = probe("echo", echo_ckpt=ECHO_CKPT)
-        assert status.available is True
         assert status.kind == "seq2seq"
-        assert status.n_parameters > 0
+        assert status.available is False
+        assert "FAST" in status.reason or "EEG2Text" in status.reason
+        assert status.details and status.details["n_tensors"] > 0
 
     def test_checkpoint_reports_its_shape(self) -> None:
         from bci_eeg_to_text.benchmark import echo_checkpoint_info
@@ -166,8 +173,12 @@ class TestThought2TextOnDisk:
 class TestRunBenchmark:
     def test_runs_a_model_and_labels_the_row(self) -> None:
         from bci_eeg_to_text.benchmark import CTCAdapter, run_benchmark
+        from bci_eeg_to_text.tokenizer import CharTokenizer
 
-        adapter = CTCAdapter("ours", FakeEEG(), n_frames_stride=32)
+        adapter = CTCAdapter(
+            "ours", FakeEEG(), n_frames_stride=32,
+            tokenizer=CharTokenizer.build(["你好"]),
+        )
         rows = run_benchmark(
             [adapter],
             eeg=[torch.randn(1, 4, 256)],
@@ -177,10 +188,13 @@ class TestRunBenchmark:
         assert "cer" in rows[0]
 
     def test_skips_are_recorded_not_dropped(self) -> None:
-        from bci_eeg_to_text.benchmark import CTCAdapter, run_benchmark
-        from bci_eeg_to_text.benchmark import ModelStatus
+        from bci_eeg_to_text.benchmark import CTCAdapter, ModelStatus, run_benchmark
+        from bci_eeg_to_text.tokenizer import CharTokenizer
 
-        adapter = CTCAdapter("ours", FakeEEG(), n_frames_stride=32)
+        adapter = CTCAdapter(
+            "ours", FakeEEG(), n_frames_stride=32,
+            tokenizer=CharTokenizer.build(["你好"]),
+        )
         rows = run_benchmark(
             [adapter],
             eeg=[torch.randn(1, 4, 256)],
