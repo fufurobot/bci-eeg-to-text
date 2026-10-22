@@ -83,7 +83,7 @@ class TestConfigRoundTrip:
 
 class TestModelContract:
     def test_forward_returns_per_frame_logits(self) -> None:
-        from bci_eeg_to_text.hf_model import EEGCTCModel, EEGCTCConfig
+        from bci_eeg_to_text.hf_model import EEGCTCConfig, EEGCTCModel
 
         model = EEGCTCModel(
             EEGCTCConfig(
@@ -98,7 +98,7 @@ class TestModelContract:
         assert logits.shape[2] == 17
 
     def test_lengths_are_reported_for_ctc(self) -> None:
-        from bci_eeg_to_text.hf_model import EEGCTCModel, EEGCTCConfig
+        from bci_eeg_to_text.hf_model import EEGCTCConfig, EEGCTCModel
 
         model = EEGCTCModel(
             EEGCTCConfig(
@@ -113,7 +113,7 @@ class TestModelContract:
         assert reported == logits.shape[1]
 
     def test_save_pretrained_creates_a_loadable_folder(self, tmp_path: Path) -> None:
-        from bci_eeg_to_text.hf_model import EEGCTCModel, EEGCTCConfig
+        from bci_eeg_to_text.hf_model import EEGCTCConfig, EEGCTCModel
 
         model = EEGCTCModel(
             EEGCTCConfig(n_channels=8, n_classes=17, d_model=32, n_heads=4, n_layers=1)
@@ -234,9 +234,9 @@ class TestAnyHuggingFaceFolder:
     """The training entry point must accept any folder AutoModel can load."""
 
     def test_local_folder_is_accepted(self, tmp_path: Path) -> None:
-        from bci_eeg_to_text.hf_model import load_any_backbone
-
         from transformers import BertConfig, BertModel
+
+        from bci_eeg_to_text.hf_model import load_any_backbone
 
         BertModel(
             BertConfig(
@@ -266,6 +266,9 @@ class TestAnyHuggingFaceFolder:
 
             class Dummy:
                 config = type("C", (), {"hidden_size": 32})()
+
+                def eval(self):
+                    return self
 
                 def __call__(self, x):
                     return torch.zeros(x.shape[0], 4, 32)

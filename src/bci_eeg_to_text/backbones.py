@@ -46,6 +46,7 @@ from bci_eeg_to_text.model import EEGToTextCTC, ModelConfig
 #: Training modes, in the order they are documented in the README.
 TRAINING_MODES = (
     "scratch",
+    "conv-transformer",
     "bert-ctc",
     "neurolm-sft",
     "neurolm-adapter",
@@ -475,10 +476,60 @@ def make_neurolm_backbone(config: BackboneConfig) -> type[nn.Module]:
     return NeuroLMBackbone
 
 
+class ConvTransformerBackbone(nn.Module):
+    """Convolutional front-end plus transformer encoder.
+
+    The convolution turns a long raw trial into a short sequence; the transformer
+    then attends over the whole trial at once, so each frame's prediction is
+    informed by the whole sentence. CTC decodes all characters in a single
+    forward pass, with no autoregressive loop.
+    """
+
+    family = "conv-transformer"
+
+    def __init__(self, config: BackboneConfig) -> None:
+        super().__init__()
+        from bci_eeg_to_text.conv_transformer import (
+            ConvTransformerConfig,
+            ConvTransformerEncoder,
+        )
+
+        extra = config.extra or {}
+        self._encoder = ConvTransformerEncoder(
+            ConvTransformerConfig(
+                n_channels=config.n_channels,
+                d_model=config.d_model,
+                n_heads=int(extra.get("n_heads", 8)),
+                n_layers=int(extra.get("n_layers", 4)),
+                dropout=config.dropout,
+                max_frames=int(extra.get("max_frames", 512)),
+            )
+        )
+
+    @property
+    def output_stride(self) -> int:
+        return self._encoder.output_stride
+
+    @property
+    def d_model(self) -> int:
+        return self._encoder.d_model
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._encoder(x)
+
+    def input_lengths_to_output(self, lengths: torch.Tensor) -> torch.Tensor:
+        return self._encoder.input_lengths_to_output(lengths)
+
+    def trainable_parameter_count(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
 def build_backbone(family: str, config: BackboneConfig) -> Backbone:
     """Instantiate a backbone by family name."""
     if family in {"conv", "scratch"}:
         return ConvBackbone(config)
+    if family in {"conv-transformer", "transformer"}:
+        return ConvTransformerBackbone(config)
     if family == "bert":
         return make_bert_backbone(config)()
 
@@ -515,6 +566,8 @@ def build_ctc_model(
 
     if mode == "scratch":
         backbone: Backbone = ConvBackbone(config)
+    elif mode == "conv-transformer":
+        backbone = ConvTransformerBackbone(config)
     elif mode == "bert-ctc":
         backbone = make_bert_backbone(config)()
     elif mode == "neurolm-sft":
