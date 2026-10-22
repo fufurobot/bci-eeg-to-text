@@ -230,3 +230,6 @@ htmlcov/
 
 # Materialised split trees (symlinks, regenerable)
 splits/
+
+# Training/experiment outputs
+runs/
