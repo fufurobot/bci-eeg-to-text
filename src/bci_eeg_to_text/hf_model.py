@@ -352,9 +352,7 @@ def load_any_backbone(
             if "pixel_values" in _params(self.inner):
                 return x
             config = getattr(self.inner, "config", None)
-            width = getattr(config, "hidden_size", None) or getattr(
-                config, "d_model", None
-            )
+            width = getattr(config, "hidden_size", None) or getattr(config, "d_model", None)
             if width is None or x.shape[1] == width:
                 return x
             if self.adapter is None:

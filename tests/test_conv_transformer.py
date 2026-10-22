@@ -22,9 +22,7 @@ from bci_eeg_to_text.conv_transformer import (
 
 @pytest.fixture
 def config() -> ConvTransformerConfig:
-    return ConvTransformerConfig(
-        n_channels=8, d_model=32, n_heads=4, n_layers=2, max_frames=256
-    )
+    return ConvTransformerConfig(n_channels=8, d_model=32, n_heads=4, n_layers=2, max_frames=256)
 
 
 class TestConfig:
@@ -59,9 +57,7 @@ class TestConvStage:
         for n in (250, 500, 1000, 1001):
             stage = ConvStage(4, 4, kernel_size=7, stride=8, dropout=0.0)
             out = stage(torch.randn(1, 4, n))
-            expected = torch.nn.Conv1d(4, 4, 7, stride=8, padding=3)(
-                torch.zeros(1, 4, n)
-            ).shape[-1]
+            expected = torch.nn.Conv1d(4, 4, 7, stride=8, padding=3)(torch.zeros(1, 4, n)).shape[-1]
             assert out.shape[-1] == expected, f"n={n}"
 
     def test_has_a_residual_connection(self) -> None:
@@ -159,18 +155,14 @@ class TestEncoder:
         assert torch.isfinite(out).all()
 
     def test_rejects_sequence_beyond_max_frames(self) -> None:
-        cfg = ConvTransformerConfig(
-            n_channels=8, d_model=32, n_heads=4, n_layers=1, max_frames=16
-        )
+        cfg = ConvTransformerConfig(n_channels=8, d_model=32, n_heads=4, n_layers=1, max_frames=16)
         with pytest.raises(ValueError, match="exceeds max_frames"):
             ConvTransformerEncoder(cfg)(torch.randn(1, 8, 4096))
 
     def test_gradients_flow(self, config: ConvTransformerConfig) -> None:
         encoder = ConvTransformerEncoder(config)
         encoder(torch.randn(1, 8, 1152)).sum().backward()
-        assert any(
-            p.grad is not None and p.grad.abs().sum() > 0 for p in encoder.parameters()
-        )
+        assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in encoder.parameters())
 
 
 class TestBackboneIntegration:
@@ -182,9 +174,7 @@ class TestBackboneIntegration:
     def test_builds_a_ctc_model(self) -> None:
         from bci_eeg_to_text.backbones import build_ctc_model
 
-        model = build_ctc_model(
-            "conv-transformer", n_channels=8, n_classes=17, d_model=32
-        )
+        model = build_ctc_model("conv-transformer", n_channels=8, n_classes=17, d_model=32)
         logits = model(torch.randn(2, 8, 1152))
         assert logits.shape[0] == 2
         assert logits.shape[2] == 17
@@ -193,9 +183,7 @@ class TestBackboneIntegration:
         """The requested architecture, asserted structurally."""
         from bci_eeg_to_text.backbones import build_ctc_model
 
-        model = build_ctc_model(
-            "conv-transformer", n_channels=8, n_classes=17, d_model=32
-        )
+        model = build_ctc_model("conv-transformer", n_channels=8, n_classes=17, d_model=32)
         kinds = {type(m).__name__ for m in model.modules()}
         assert "LayerNorm" in kinds
         assert "ConvTransformerEncoder" in kinds

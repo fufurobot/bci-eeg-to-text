@@ -186,8 +186,7 @@ def probe(
         try:
             info = echo_checkpoint_info(ckpt)
         except Exception as exc:  # noqa: BLE001
-            return ModelStatus(name, False, reason=f"unreadable checkpoint: {exc}",
-                               kind="seq2seq")
+            return ModelStatus(name, False, reason=f"unreadable checkpoint: {exc}", kind="seq2seq")
         code_present = (ckpt.parent.parent / "FAST").exists() or (
             ckpt.parent.parent / "EEG2Text"
         ).exists()
@@ -275,7 +274,6 @@ def format_table(rows: list[dict[str, object]]) -> str:
             lines.append(f"{str(row['model']):<18}{'-':>8}{'-':>8}{'-':>6}  skipped: {reason}")
             continue
         lines.append(
-            f"{str(row['model']):<18}{row['cer']:>8.3f}{row['exact_match']:>8.3f}"
-            f"{int(row['n']):>6}"
+            f"{str(row['model']):<18}{row['cer']:>8.3f}{row['exact_match']:>8.3f}{int(row['n']):>6}"
         )
     return "\n".join(lines)

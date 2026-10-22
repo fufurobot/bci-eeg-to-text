@@ -176,7 +176,9 @@ class TestRunBenchmark:
         from bci_eeg_to_text.tokenizer import CharTokenizer
 
         adapter = CTCAdapter(
-            "ours", FakeEEG(), n_frames_stride=32,
+            "ours",
+            FakeEEG(),
+            n_frames_stride=32,
             tokenizer=CharTokenizer.build(["你好"]),
         )
         rows = run_benchmark(
@@ -192,7 +194,9 @@ class TestRunBenchmark:
         from bci_eeg_to_text.tokenizer import CharTokenizer
 
         adapter = CTCAdapter(
-            "ours", FakeEEG(), n_frames_stride=32,
+            "ours",
+            FakeEEG(),
+            n_frames_stride=32,
             tokenizer=CharTokenizer.build(["你好"]),
         )
         rows = run_benchmark(
@@ -206,8 +210,6 @@ class TestRunBenchmark:
     def test_table_is_human_readable(self) -> None:
         from bci_eeg_to_text.benchmark import format_table
 
-        table = format_table(
-            [{"model": "ours", "cer": 0.5, "exact_match": 0.2, "n": 10}]
-        )
+        table = format_table([{"model": "ours", "cer": 0.5, "exact_match": 0.2, "n": 10}])
         assert "model" in table.lower()
         assert "ours" in table

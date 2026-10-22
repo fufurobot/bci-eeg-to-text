@@ -52,9 +52,7 @@ class TestConfigRoundTrip:
     def test_config_is_saved_with_model_type(self, tmp_path: Path) -> None:
         from bci_eeg_to_text.hf_model import EEGCTCConfig
 
-        cfg = EEGCTCConfig(
-            n_channels=128, n_classes=1002, d_model=64, n_heads=4, n_layers=2
-        )
+        cfg = EEGCTCConfig(n_channels=128, n_classes=1002, d_model=64, n_heads=4, n_layers=2)
         cfg.save_pretrained(tmp_path)
         payload = json.loads((tmp_path / "config.json").read_text())
         assert payload["model_type"] == "eeg-ctc"
@@ -65,8 +63,13 @@ class TestConfigRoundTrip:
         from bci_eeg_to_text.hf_model import EEGCTCConfig
 
         cfg = EEGCTCConfig(
-            n_channels=8, n_classes=17, d_model=32, n_heads=4, n_layers=1,
-            conv_channels=(8, 16), conv_strides=(2, 4),
+            n_channels=8,
+            n_classes=17,
+            d_model=32,
+            n_heads=4,
+            n_layers=1,
+            conv_channels=(8, 16),
+            conv_strides=(2, 4),
         )
         cfg.save_pretrained(tmp_path)
         loaded = EEGCTCConfig.from_pretrained(tmp_path)
@@ -87,8 +90,13 @@ class TestModelContract:
 
         model = EEGCTCModel(
             EEGCTCConfig(
-                n_channels=8, n_classes=17, d_model=32, n_heads=4, n_layers=1,
-                conv_channels=(8, 16), conv_strides=(2, 4),
+                n_channels=8,
+                n_classes=17,
+                d_model=32,
+                n_heads=4,
+                n_layers=1,
+                conv_channels=(8, 16),
+                conv_strides=(2, 4),
             )
         ).eval()
         out = model(pixel_values=torch.randn(2, 8, 1000))
@@ -102,8 +110,13 @@ class TestModelContract:
 
         model = EEGCTCModel(
             EEGCTCConfig(
-                n_channels=8, n_classes=17, d_model=32, n_heads=4, n_layers=1,
-                conv_channels=(8,), conv_strides=(4,),
+                n_channels=8,
+                n_classes=17,
+                d_model=32,
+                n_heads=4,
+                n_layers=1,
+                conv_channels=(8,),
+                conv_strides=(4,),
             )
         ).eval()
         n = 1000
@@ -240,8 +253,11 @@ class TestAnyHuggingFaceFolder:
 
         BertModel(
             BertConfig(
-                vocab_size=64, hidden_size=32, num_hidden_layers=1,
-                num_attention_heads=4, intermediate_size=64,
+                vocab_size=64,
+                hidden_size=32,
+                num_hidden_layers=1,
+                num_attention_heads=4,
+                intermediate_size=64,
             )
         ).save_pretrained(tmp_path)
         backbone = load_any_backbone(str(tmp_path), n_channels=8, d_model=32)

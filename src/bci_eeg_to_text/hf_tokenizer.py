@@ -69,6 +69,7 @@ class EEGCharacterTokenizer(PreTrainedTokenizer):
         try:
             from bci_eeg_to_text.tokenizer import normalize_text
         except ImportError:  # pragma: no cover - vendored copy
+
             def normalize_text(value: str) -> str:
                 return "".join(value.split())
 
