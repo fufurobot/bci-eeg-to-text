@@ -226,6 +226,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-steps", type=int, default=None, help="stop after N optimizer steps (smoke test)"
     )
 
+    from bci_eeg_to_text.benchmark_cli import add_benchmark_subparser
+
+    add_benchmark_subparser(sub)
+
     p_eval = sub.add_parser("evaluate", help="evaluate a checkpoint")
     p_eval.add_argument(
         "--split",
@@ -966,6 +970,8 @@ def main(argv: list[str] | None = None) -> int:
         "train": cmd_train,
         "evaluate": cmd_evaluate,
         "inspect": cmd_inspect,
+        # `benchmark` carries its own subcommand; dispatch through the args.
+        "benchmark": lambda a: a.func(a),
     }
     return handlers[args.command](args)
 

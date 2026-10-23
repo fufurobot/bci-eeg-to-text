@@ -29,7 +29,7 @@ from bci_eeg_to_text.smoke import (
 def make_rows(subject: str, texts_per_run: list[list[tuple[str, str]]]) -> list[dict]:
     """Rows shaped like the streaming index: one per (run, text)."""
     rows = []
-    for run_id, items in enumerate(texts_per_run):
+    for items in texts_per_run:
         for row_index, (text, run_name) in enumerate(items):
             rows.append(
                 {
@@ -142,7 +142,7 @@ class TestCliWiring:
         from bci_eeg_to_text.benchmark_cli import build_parser
 
         args = build_parser().parse_args(
-            ["eeg2text", "--model", "all", "--dataset", "chineseeeg", "--smoke"]
+            ["benchmark", "eeg2text", "--model", "all", "--dataset", "chineseeeg", "--smoke"]
         )
         assert args.model == "all"
         assert args.dataset == ["chineseeeg"]
@@ -152,7 +152,16 @@ class TestCliWiring:
         from bci_eeg_to_text.benchmark_cli import build_parser
 
         args = build_parser().parse_args(
-            ["eeg2text", "--model", "ours", "--dataset", "a", "--dataset", "b"]
+            [
+                "benchmark",
+                "eeg2text",
+                "--model",
+                "conv-transformer",
+                "--dataset",
+                "a",
+                "--dataset",
+                "b",
+            ]
         )
         assert args.dataset == ["a", "b"]
 
@@ -169,7 +178,9 @@ class TestCliWiring:
     def test_smoke_flag_defaults_off(self) -> None:
         from bci_eeg_to_text.benchmark_cli import build_parser
 
-        args = build_parser().parse_args(["eeg2text", "--model", "ours", "--dataset", "a"])
+        args = build_parser().parse_args(
+            ["benchmark", "eeg2text", "--model", "conv-transformer", "--dataset", "a"]
+        )
         assert args.smoke is False
 
 
