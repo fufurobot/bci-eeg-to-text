@@ -15,7 +15,6 @@ dataset or task has to be enough for it to appear in ``list`` and be runnable.
 from __future__ import annotations
 
 import pytest
-
 from bci_eeg_to_text.registry import (
     DatasetSpec,
     ExperimentSpec,
@@ -69,8 +68,11 @@ class TestDatasetRegistry:
         with pytest.raises(RegistryError, match="already registered"):
             register_dataset(
                 lambda: DatasetSpec(
-                    name="chineseeeg", description="dup", openneuro_id="x",
-                    task="eeg2text", text_unit="row",
+                    name="chineseeeg",
+                    description="dup",
+                    openneuro_id="x",
+                    task="eeg2text",
+                    text_unit="row",
                 ),
                 name="chineseeeg",
             )
@@ -111,8 +113,10 @@ class TestExperimentRegistry:
         """Future EEG tasks must not pollute the eeg2text list."""
         register_experiment(
             lambda: ExperimentSpec(
-                name="toy-eeg2image", description="different task",
-                task="eeg2image", trains_in_process=True,
+                name="toy-eeg2image",
+                description="different task",
+                task="eeg2image",
+                trains_in_process=True,
             ),
             name="toy-eeg2image",
         )
@@ -138,8 +142,13 @@ class TestCliSurface:
 
         args = build_parser().parse_args(
             [
-                "experiment", "run", "conv-transformer",
-                "--dataset", "chineseeeg", "--training-mode", "cpu",
+                "experiment",
+                "run",
+                "conv-transformer",
+                "--dataset",
+                "chineseeeg",
+                "--training-mode",
+                "cpu",
             ]
         )
         assert args.name == "conv-transformer"
@@ -150,8 +159,7 @@ class TestCliSurface:
 
         for mode in ("cpu", "gpu", "ssh"):
             args = build_parser().parse_args(
-                ["experiment", "run", "echo", "--dataset", "chineseeeg",
-                 "--training-mode", mode]
+                ["experiment", "run", "echo", "--dataset", "chineseeeg", "--training-mode", mode]
             )
             assert args.training_mode == mode
 
@@ -159,8 +167,7 @@ class TestCliSurface:
         from bci_eeg_to_text.cli import build_parser
 
         args = build_parser().parse_args(
-            ["experiment", "run", "echo", "--dataset", "chineseeeg",
-             "--strategy", "fsdp"]
+            ["experiment", "run", "echo", "--dataset", "chineseeeg", "--strategy", "fsdp"]
         )
         assert args.strategy == "fsdp"
 
@@ -168,8 +175,17 @@ class TestCliSurface:
         from bci_eeg_to_text.cli import build_parser
 
         args = build_parser().parse_args(
-            ["experiment", "run", "echo", "--dataset", "chineseeeg",
-             "--training-mode", "ssh", "--hosts", "j:2|w:4"]
+            [
+                "experiment",
+                "run",
+                "echo",
+                "--dataset",
+                "chineseeeg",
+                "--training-mode",
+                "ssh",
+                "--hosts",
+                "j:2|w:4",
+            ]
         )
         assert args.hosts == "j:2|w:4"
 

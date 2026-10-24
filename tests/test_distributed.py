@@ -79,9 +79,12 @@ class TestStrategies:
 
 
 class TestMultiHopSSH:
-    def test_parses_a_flat_host_list(self) -> None:
-        hops = dist.parse_topology("a:1,b:2")
-        assert hops == ["a:1", "b:2"]
+    def test_parses_a_single_hop(self) -> None:
+        assert dist.parse_topology("worker:4") == ["worker:4"]
+
+    def test_pipe_separates_hops(self) -> None:
+        """'|' is the hop separator so a host list stays unambiguous."""
+        assert dist.parse_topology("j1:22|j2:22|w:8") == ["j1:22", "j2:22", "w:8"]
 
     def test_parses_a_multi_hop_chain(self) -> None:
         """a -> b -> c: the last hop is the worker, the rest are jump hosts."""
@@ -91,7 +94,6 @@ class TestMultiHopSSH:
     def test_builds_a_proxy_jump_through_each_hop(self) -> None:
         chain = dist.parse_topology("j1:22|j2:22|w:8")
         argv = dist.build_ssh_command(chain, remote_cmd="echo hi", identity=Path("/k"))
-        joined = " ".join(argv)
         assert "-J" in argv
         # Two jumps for a three-hop chain.
         jump = argv[argv.index("-J") + 1]
@@ -103,9 +105,7 @@ class TestMultiHopSSH:
 
     def test_command_propagates_strict_options_to_every_hop(self) -> None:
         """Jump hosts must not prompt; BatchMode keeps a hung hop from blocking."""
-        argv = dist.build_ssh_command(
-            ["j:1", "w:2"], remote_cmd="true", identity=Path("/k")
-        )
+        argv = dist.build_ssh_command(["j:1", "w:2"], remote_cmd="true", identity=Path("/k"))
         assert "BatchMode=yes" in " ".join(argv)
 
     def test_worker_count_comes_from_the_last_hop(self) -> None:
@@ -128,7 +128,11 @@ class TestLaunchCommand:
             script=Path("train.py"),
             extra=["--lr", "1e-3"],
         )
-        assert "torchrun" in argv[0]
+        # The launcher may be the torchrun console script or
+        # `python -m torch.distributed.run`; both are valid, and which exists
+        # depends on PATH. What matters is that it is a distributed launcher.
+        joined = " ".join(argv)
+        assert "torchrun" in joined or "torch.distributed.run" in joined
         assert "--nproc_per_node=2" in argv
 
     def test_local_launch_keeps_dataparallel_in_one_process(self) -> None:
@@ -149,7 +153,9 @@ class TestLaunchCommand:
             identity=Path("/k"),
         )
         assert argv[0] == "ssh"
-        assert "torchrun" in " ".join(argv)
+        joined = " ".join(argv)
+        assert "torch.distributed.run" in joined or "torchrun" in joined
+        assert "--nproc_per_node=2" in joined
 
 
 class TestClusterProbe:
@@ -167,6 +173,4 @@ class TestClusterProbe:
 
     def test_unreachable_host_stops_launch(self) -> None:
         with pytest.raises(dist.ClusterUnreachable, match="w:1"):
-            dist.require_reachable(
-                [dist.HostStatus("w:1", reachable=False, reason="no route")]
-            )
+            dist.require_reachable([dist.HostStatus("w:1", reachable=False, reason="no route")])

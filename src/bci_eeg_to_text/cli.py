@@ -227,8 +227,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     from bci_eeg_to_text.benchmark_cli import add_benchmark_subparser
+    from bci_eeg_to_text.entrypoints import add_dataset_subparser, add_experiment_subparser
 
     add_benchmark_subparser(sub)
+    add_dataset_subparser(sub)
+    add_experiment_subparser(sub)
 
     p_eval = sub.add_parser("evaluate", help="evaluate a checkpoint")
     p_eval.add_argument(
@@ -972,6 +975,8 @@ def main(argv: list[str] | None = None) -> int:
         "inspect": cmd_inspect,
         # `benchmark` carries its own subcommand; dispatch through the args.
         "benchmark": lambda a: a.func(a),
+        "dataset": lambda a: a.func(a),
+        "experiment": lambda a: a.func(a),
     }
     return handlers[args.command](args)
 
