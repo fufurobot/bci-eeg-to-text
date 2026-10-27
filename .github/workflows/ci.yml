@@ -35,7 +35,7 @@ jobs:
       #
       # --no-config is required: pyproject.toml pins torch to the CUDA index via
       # [tool.uv.sources] for local GPU work, and that pin overrides
-      # --index-url. Without it this step silently installed torch 2.7.1+cu118,
+      # --index-url. Without it this step silently installed torch 2.7.1 with CUDA libraries,
       # so CI was downloading 863 MB of CUDA libraries it cannot use and was not
       # testing the CPU build its comment promised.
       - name: Install dependencies

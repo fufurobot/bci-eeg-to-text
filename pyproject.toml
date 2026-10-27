@@ -10,7 +10,7 @@ requires-python = ">=3.13"
 dependencies = [
     "mne>=1.13.2",
     "pyedflib>=0.1.42",
-    "torch==2.7.1+cu118",
+    "torch>=2.7.1",
     "torchaudio==2.7.1",
     "torchvision==0.22.1",
     "transformers>=5.19.0",
@@ -30,7 +30,12 @@ torchaudio = { index = "pytorch" }
 
 [[tool.uv.index]]
 name = "pytorch"
-url = "https://download.pytorch.org/whl/cu118"
+# CUDA 12.6 wheels from the CERNET mirror. Two reasons for the mirror rather
+# than PyTorch's own host: download.pytorch.org is not reachable from all the
+# machines this runs on, and this is the index the cluster machine already
+# uses. cu126 stays below CUDA 13, and supports sm_61 (GTX 1050) as well as
+# newer cards.
+url = "https://mirrors.cernet.edu.cn/pytorch/whl/cu126"
 
 [dependency-groups]
 dev = [
