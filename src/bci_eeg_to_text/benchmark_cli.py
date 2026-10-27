@@ -80,9 +80,16 @@ def add_benchmark_subparser(sub: argparse._SubParsersAction) -> None:
         "--max-temp",
         type=float,
         default=80.0,
+        help="GPU ceiling in Celsius (hard limit); this machine's fan is broken",
+    )
+    p.add_argument(
+        "--max-cpu-temp",
+        type=float,
+        default=88.0,
         help=(
-            "thermal ceiling in Celsius; the run refuses to start above it and "
-            "aborts if any sensor reaches it (this machine's fan is broken)"
+            "CPU ceiling in Celsius; higher than the GPU ceiling because the "
+            "external cooling cannot hold the package lower. Lower it when "
+            "better fans are fitted."
         ),
     )
     p.add_argument(
@@ -216,6 +223,7 @@ def run_eeg2text_benchmark(args: argparse.Namespace) -> int:
         hf_models=args.hf_models,
         use_mlflow=not args.no_mlflow,
         max_temp=args.max_temp,
+        max_cpu_temp=args.max_cpu_temp,
         thermal_interval=args.thermal_interval,
         printer=print,
         table=format_table,

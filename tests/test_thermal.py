@@ -17,8 +17,14 @@ from bci_eeg_to_text import thermal
 
 
 def fake_state(*temps: tuple[str, float], limit: float = 80.0) -> thermal.ThermalState:
+    """Build a state; ``gpu*`` sensors get the hard limit, others the CPU one."""
     return thermal.ThermalState(
-        readings=[thermal.Reading(sensor=s, celsius=c) for s, c in temps],
+        readings=[
+            thermal.Reading(
+                sensor=s, celsius=c, kind="gpu" if s.startswith("gpu") else "cpu"
+            )
+            for s, c in temps
+        ],
         limit=limit,
     )
 
@@ -32,14 +38,21 @@ class TestState:
     def test_ok_when_every_sensor_is_within_the_limit(self) -> None:
         assert fake_state(("cpu", 60), ("gpu", 79.9)).ok is True
 
-    def test_not_ok_when_any_sensor_exceeds_the_limit(self) -> None:
-        state = fake_state(("cpu", 81), ("gpu", 50))
+    def test_gpu_over_80_is_a_violation(self) -> None:
+        """The GPU ceiling is the hard one at 80 C."""
+        state = fake_state(("cpu", 50), ("gpu", 81))
         assert state.ok is False
-        assert [r.sensor for r in state.violations()] == ["cpu"]
+        assert [r.sensor for r in state.violations()] == ["gpu"]
+
+    def test_cpu_gets_the_looser_ceiling(self) -> None:
+        """This machine's cooling cannot hold the CPU under 80, so its limit is
+        higher by policy; the GPU limit stays hard."""
+        state = fake_state(("cpu", 85))
+        assert state.ok is True
+        assert fake_state(("cpu", 89)).ok is False
 
     def test_exactly_at_the_limit_is_acceptable(self) -> None:
-        """80 C is the ceiling, not a violation of it."""
-        assert fake_state(("cpu", 80.0)).ok is True
+        assert fake_state(("gpu", 80.0)).ok is True
 
     def test_no_sensors_is_unknown_not_cool(self) -> None:
         """An unreadable machine must never be reported as safe."""
@@ -82,16 +95,24 @@ class TestReadingSensors:
 
 class TestRequireCool:
     def test_raises_when_already_hot(self, monkeypatch) -> None:
-        monkeypatch.setattr(thermal, "snapshot", lambda limit=80.0: fake_state(("cpu", 85)))
+        monkeypatch.setattr(
+            thermal, "snapshot",
+            lambda limit=80.0, cpu_limit=88.0: fake_state(("gpu", 85)),
+        )
         with pytest.raises(thermal.ThermalError, match="exceeds"):
             thermal.require_cool()
 
     def test_passes_when_cool(self, monkeypatch) -> None:
-        monkeypatch.setattr(thermal, "snapshot", lambda limit=80.0: fake_state(("cpu", 60)))
+        monkeypatch.setattr(
+            thermal, "snapshot",
+            lambda limit=80.0, cpu_limit=88.0: fake_state(("gpu", 60)),
+        )
         assert thermal.require_cool().ok
 
     def test_refuses_to_run_blind_when_no_sensor_is_readable(self, monkeypatch) -> None:
-        monkeypatch.setattr(thermal, "snapshot", lambda limit=80.0: thermal.ThermalState())
+        monkeypatch.setattr(
+            thermal, "snapshot", lambda limit=80.0, cpu_limit=88.0: thermal.ThermalState()
+        )
         with pytest.raises(thermal.ThermalError, match="no temperature sensors"):
             thermal.require_cool()
 
@@ -110,15 +131,15 @@ class TestGuard:
         assert guard.peak == 70.0
 
     def test_raises_immediately_on_breach(self) -> None:
-        guard = thermal.ThermalGuard(sample=lambda: fake_state(("cpu", 85)))
+        guard = thermal.ThermalGuard(sample=lambda: fake_state(("gpu", 85)))
         with pytest.raises(thermal.ThermalError, match="thermal limit exceeded"):
             guard.poll()
 
     def test_stops_at_the_first_breach_without_continuing(self) -> None:
-        temps = iter([60.0, 81.0, 60.0])
+        temps = iter([60.0, 81.0, 60.0])  # breach is on the GPU
 
         def sample():
-            return fake_state(("cpu", next(temps)))
+            return fake_state(("gpu", next(temps)))
 
         guard = thermal.ThermalGuard(sample=sample)
         guard.poll()
@@ -133,7 +154,7 @@ class TestGuard:
         assert len(guard.history) == 1
 
     def test_entering_the_context_performs_a_preflight_check(self) -> None:
-        guard = thermal.ThermalGuard(sample=lambda: fake_state(("cpu", 85)))
+        guard = thermal.ThermalGuard(sample=lambda: fake_state(("gpu", 85)))
         with pytest.raises(thermal.ThermalError), guard:
             pass
 
@@ -153,7 +174,8 @@ class TestGuard:
         guard.poll()
         summary = guard.summary()
         assert "peak 66C" in summary
-        assert "limit 80C" in summary
+        # Both ceilings are reported, since they differ by design.
+        assert "80C" in summary
 
 
 class TestRealSensors:

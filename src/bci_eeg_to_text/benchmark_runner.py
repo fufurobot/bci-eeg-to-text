@@ -355,6 +355,7 @@ def execute(
     hf_models: Path,
     use_mlflow: bool,
     max_temp: float = 80.0,
+    max_cpu_temp: float = 88.0,
     thermal_interval: float = 10.0,
     printer=print,
     table=None,
@@ -370,7 +371,7 @@ def execute(
     # Check before doing any work: an already-hot machine should not be loaded
     # further, and this machine's fan is broken.
     try:
-        baseline = thermal.require_cool(max_temp)
+        baseline = thermal.require_cool(max_temp, cpu_limit=max_cpu_temp)
     except thermal.ThermalError as exc:
         printer(f"refusing to run: {exc}")
         return 2
@@ -378,6 +379,7 @@ def execute(
 
     guard = thermal.ThermalGuard(
         max_temp,
+        cpu_limit=max_cpu_temp,
         interval=thermal_interval,
         on_sample=lambda s: printer(f"  {s.describe()}"),
     )

@@ -24,8 +24,18 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-#: Default ceiling in degrees Celsius for any sensor.
-DEFAULT_LIMIT_C = 80.0
+#: Ceiling for the GPU. This is the hard limit: a discrete GPU has its own
+#: thermal envelope and the external cooling here is sized for the CPU.
+DEFAULT_GPU_LIMIT_C = 80.0
+
+#: Ceiling for the CPU package. The machine's own fan is broken and cooling is
+#: external, so the CPU runs hot by design; this ceiling is set by what that
+#: cooling can hold, not by the chip's maximum. It is higher than the GPU limit
+#: on purpose, and should be lowered when better cooling is installed.
+DEFAULT_CPU_LIMIT_C = 88.0
+
+#: Backwards-compatible alias for the GPU ceiling.
+DEFAULT_LIMIT_C = DEFAULT_GPU_LIMIT_C
 
 
 class ThermalError(RuntimeError):
@@ -43,11 +53,19 @@ class Reading:
 
 @dataclass
 class ThermalState:
-    """A snapshot of every sensor available on the machine."""
+    """A snapshot of every sensor available on the machine.
+
+    Limits are per sensor kind: the GPU has the hard ceiling, while the CPU
+    ceiling is looser because this machine's cooling cannot hold it lower.
+    """
 
     readings: list[Reading] = field(default_factory=list)
-    limit: float = DEFAULT_LIMIT_C
+    limit: float = DEFAULT_GPU_LIMIT_C
     timestamp: float = 0.0
+    cpu_limit: float = DEFAULT_CPU_LIMIT_C
+
+    def limit_for(self, kind: str) -> float:
+        return self.cpu_limit if kind == "cpu" else self.limit
 
     @property
     def hottest(self) -> Reading | None:
@@ -62,24 +80,30 @@ class ThermalState:
 
     @property
     def ok(self) -> bool:
-        """True when every known sensor is within the limit.
+        """True when every sensor is within its own kind's limit.
 
         No sensors means *unknown*, which is reported as not ok: silently
         treating an unreadable machine as cool is how hardware gets damaged.
         """
         if not self.readings:
             return False
-        return all(r.celsius <= self.limit for r in self.readings)
+        return all(r.celsius <= self.limit_for(r.kind) for r in self.readings)
 
     def violations(self) -> list[Reading]:
-        return [r for r in self.readings if r.celsius > self.limit]
+        return [r for r in self.readings if r.celsius > self.limit_for(r.kind)]
 
     def describe(self) -> str:
         if not self.readings:
             return "temperature: unknown (no sensors readable)"
-        parts = [f"{r.sensor}={r.celsius:.0f}C" for r in self.readings]
+        parts = [
+            f"{r.sensor}={r.celsius:.0f}C/{self.limit_for(r.kind):.0f}C"
+            for r in self.readings
+        ]
         verdict = "ok" if self.ok else "OVER LIMIT"
-        return f"temperature: {' '.join(parts)} (limit {self.limit:.0f}C, {verdict})"
+        return (
+            f"temperature: {' '.join(parts)} "
+            f"(gpu {self.limit:.0f}C, cpu {self.cpu_limit:.0f}C; {verdict})"
+        )
 
 
 def read_cpu_temps(thermal_root: Path = Path("/sys/class/thermal")) -> list[Reading]:
@@ -128,32 +152,37 @@ def read_gpu_temps() -> list[Reading]:
     return readings
 
 
-def snapshot(limit: float = DEFAULT_LIMIT_C) -> ThermalState:
+def snapshot(
+    limit: float = DEFAULT_GPU_LIMIT_C, *, cpu_limit: float = DEFAULT_CPU_LIMIT_C
+) -> ThermalState:
     """Read every sensor available right now."""
     return ThermalState(
         readings=[*read_cpu_temps(), *read_gpu_temps()],
         limit=limit,
+        cpu_limit=cpu_limit,
         timestamp=time.time(),
     )
 
 
-def require_cool(limit: float = DEFAULT_LIMIT_C) -> ThermalState:
+def require_cool(
+    limit: float = DEFAULT_GPU_LIMIT_C, *, cpu_limit: float = DEFAULT_CPU_LIMIT_C
+) -> ThermalState:
     """Read the sensors and raise if any is above ``limit``.
 
     Called before a run starts so an already-hot machine is not loaded further.
     """
-    state = snapshot(limit)
+    state = snapshot(limit, cpu_limit=cpu_limit)
     if not state.readings:
         raise ThermalError(
             "no temperature sensors readable; refusing to run blind on a machine "
             "with known cooling problems"
         )
     if not state.ok:
-        hot = ", ".join(f"{r.sensor}={r.celsius:.0f}C" for r in state.violations())
-        raise ThermalError(
-            f"{hot} exceeds the {limit:.0f}C limit before starting; let the machine "
-            "cool before running"
+        hot = ", ".join(
+            f"{r.sensor}={r.celsius:.0f}C>{state.limit_for(r.kind):.0f}C"
+            for r in state.violations()
         )
+        raise ThermalError(f"{hot} exceeds its limit before starting; let the machine cool")
     return state
 
 
@@ -172,15 +201,17 @@ class ThermalGuard:
 
     def __init__(
         self,
-        limit: float = DEFAULT_LIMIT_C,
+        limit: float = DEFAULT_GPU_LIMIT_C,
         *,
+        cpu_limit: float = DEFAULT_CPU_LIMIT_C,
         interval: float = 5.0,
         sample: callable | None = None,
         on_sample: callable | None = None,
     ) -> None:
         self.limit = limit
+        self.cpu_limit = cpu_limit
         self.interval = interval
-        self._sample = sample or (lambda: snapshot(limit))
+        self._sample = sample or (lambda: snapshot(limit, cpu_limit=cpu_limit))
         self._on_sample = on_sample
         self.history: list[ThermalState] = []
         self.peak: float = 0.0
