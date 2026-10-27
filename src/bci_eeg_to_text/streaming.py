@@ -36,6 +36,7 @@ from bci_eeg_to_text.chineseeeg import (
     readable_vhdr,
     row_intervals,
 )
+from bci_eeg_to_text.eeg import is_annex_pointer
 from bci_eeg_to_text.tokenizer import CharTokenizer
 
 
@@ -126,6 +127,15 @@ def index_chineseeeg(
         if dedup_key in seen:
             continue
         seen.add(dedup_key)
+
+        # Unfetched git-annex stubs look like real files but hold only a pointer
+        # line. BOTH the header and the .eeg payload must be checked: a real
+        # .vhdr next to a stubbed .eeg parses without error and then reports
+        # zero samples, which surfaces much later as "No data in this range".
+        if is_annex_pointer(run.path) or is_annex_pointer(run.path.with_suffix(".eeg")):
+            if verbose:
+                print(f"  skip {run.subject_id} {run.run}: annex pointer (not fetched)", flush=True)
+            continue
 
         events_path = source.events_path(run)
         if not events_path.exists():
@@ -229,7 +239,12 @@ class StreamingTrialDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, object]:
         trial = self.trials[index]
         raw = self.cache.get(trial.run_path)
-        data = raw.get_data(start=trial.start, stop=trial.stop)
+        # Row intervals come from the event file, and the final rows can run past
+        # the recording when its annotations disagree with its sample count by a
+        # few frames. Clamp rather than letting mne raise "No data in this range".
+        start = max(0, min(int(trial.start), raw.n_times))
+        stop = max(start + 1, min(int(trial.stop), raw.n_times))
+        data = raw.get_data(start=start, stop=stop)
         if self.decimate > 1:
             data = data[:, :: self.decimate]
 

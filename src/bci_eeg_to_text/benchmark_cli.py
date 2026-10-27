@@ -24,7 +24,13 @@ from pathlib import Path
 from bci_eeg_to_text.benchmark import ModelStatus, format_table
 
 #: Experiment names accepted by ``--model``; ``all`` expands to these.
-BENCHMARK_MODELS = ("echo", "thought2text", "conv-transformer", "neurolm")
+BENCHMARK_MODELS = (
+    "conv-bert",
+    "conv-transformer",
+    "echo",
+    "thought2text",
+    "neurolm",
+)
 
 DEFAULT_ECHO = Path("/home/fufu/ECHO/checkpoints/ECHO.ckpt")
 DEFAULT_ECHO_CODE = Path("/home/fufu/ECHO_code/ECHO")
@@ -70,6 +76,21 @@ def add_benchmark_subparser(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--thought2text-dir", type=Path, default=DEFAULT_T2T)
     p.add_argument("--hf-models", type=Path, default=DEFAULT_HF_MODELS)
     p.add_argument("--no-mlflow", action="store_true")
+    p.add_argument(
+        "--max-temp",
+        type=float,
+        default=80.0,
+        help=(
+            "thermal ceiling in Celsius; the run refuses to start above it and "
+            "aborts if any sensor reaches it (this machine's fan is broken)"
+        ),
+    )
+    p.add_argument(
+        "--thermal-interval",
+        type=float,
+        default=10.0,
+        help="seconds between temperature samples during a run",
+    )
     p.set_defaults(func=run_eeg2text_benchmark)
 
 
@@ -149,6 +170,11 @@ def probe_special(
             kind="causal-lm",
         )
 
+    if name == "conv-bert":
+        return ModelStatus(
+            name, True, kind="ctc", reason="conv + BERT encoder trained in-process with CTC"
+        )
+
     if name == "conv-transformer":
         return ModelStatus(
             name, True, kind="ctc", reason="trained in-process with CTC, one forward pass"
@@ -189,6 +215,8 @@ def run_eeg2text_benchmark(args: argparse.Namespace) -> int:
         thought2text_dir=args.thought2text_dir,
         hf_models=args.hf_models,
         use_mlflow=not args.no_mlflow,
+        max_temp=args.max_temp,
+        thermal_interval=args.thermal_interval,
         printer=print,
         table=format_table,
     )

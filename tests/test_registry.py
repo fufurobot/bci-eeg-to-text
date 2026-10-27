@@ -15,6 +15,7 @@ dataset or task has to be enough for it to appear in ``list`` and be runnable.
 from __future__ import annotations
 
 import pytest
+
 from bci_eeg_to_text.registry import (
     DatasetSpec,
     ExperimentSpec,

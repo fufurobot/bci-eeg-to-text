@@ -184,14 +184,30 @@ def make_bert_backbone(config: BackboneConfig) -> type[nn.Module]:
             )
             self.input_norm = nn.GroupNorm(1, config.d_model)
 
-            try:
-                bert_config = BertConfig.from_pretrained(default_name)
-                self.bert = BertModel.from_pretrained(default_name, config=bert_config)
-            except OSError as exc:
-                raise BackboneError(
-                    f"could not load BERT checkpoint {default_name!r}. Pass "
-                    "config.pretrained to use a local path or another model."
-                ) from exc
+            if default_name in {"config", "from_config", ""}:
+                # Build the architecture from a fresh config, no download.
+                # This is what makes conv-bert usable on a machine with no
+                # network and no cached weights: the encoder is then trained
+                # from scratch, which is an honest (if weaker) baseline than
+                # refusing to run at all.
+                bert_config = BertConfig(
+                    vocab_size=21128,
+                    hidden_size=config.d_model,
+                    num_hidden_layers=int(config.extra.get("n_layers", 4)),
+                    num_attention_heads=max(1, config.d_model // 32),
+                    intermediate_size=config.d_model * 4,
+                )
+                self.bert = BertModel(bert_config)
+            else:
+                try:
+                    bert_config = BertConfig.from_pretrained(default_name)
+                    self.bert = BertModel.from_pretrained(default_name, config=bert_config)
+                except OSError as exc:
+                    raise BackboneError(
+                        f"could not load BERT checkpoint {default_name!r}. Pass "
+                        "pretrained='config' to build it without downloading, or "
+                        "a local path to use local weights."
+                    ) from exc
 
             hidden = int(self.bert.config.hidden_size)
             # BERT has a fixed maximum sequence length, and EEG trials can

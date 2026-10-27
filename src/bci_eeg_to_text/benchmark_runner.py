@@ -145,6 +145,97 @@ class ConvTransformerExperiment:
         return RawRunCache(capacity=4)
 
 
+class ConvBertExperiment:
+    """Ours: conv front-end + BERT encoder + CTC, fine-tuned in process.
+
+    Priority row for the smoke test: BERT-base is ~110M parameters, so it fits
+    this machine's 3 GB RAM / 4 GB VRAM where NeuroLM-XL (20 GB) and
+    Mistral-7B (21 GB) do not. Weights come from a local folder when available
+    and are otherwise initialised from a small config, so the row always runs.
+    """
+
+    name = "conv-bert"
+    kind = "ctc"
+
+    def __init__(
+        self,
+        *,
+        n_samples: int = 1152,
+        d_model: int = 128,
+        n_layers: int = 2,
+        lr: float = 1e-3,
+        pretrained: str | None = None,
+        freeze_backbone: bool = False,
+    ) -> None:
+        self.n_samples = n_samples
+        self.d_model = d_model
+        self.n_layers = n_layers
+        self.lr = lr
+        self.pretrained = pretrained
+        self.freeze_backbone = freeze_backbone
+        self.model = None
+        self.tokenizer = None
+        self.device = torch.device("cpu")
+
+    def prepare(self, train_rows, *, tokenizer, device, epochs, batch_size) -> None:
+        from bci_eeg_to_text.backbones import build_ctc_model
+        from bci_eeg_to_text.streaming import StreamingTrialDataset, collate
+
+        self.tokenizer = tokenizer
+        self.device = device
+        model = build_ctc_model(
+            "bert-ctc",
+            n_channels=128,
+            n_classes=len(tokenizer),
+            d_model=self.d_model,
+            pretrained=self.pretrained or "config",
+            freeze_backbone=self.freeze_backbone,
+            extra={"n_layers": self.n_layers},
+        ).to(device)
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        optimiser = torch.optim.AdamW(trainable, lr=self.lr)
+        criterion = torch.nn.CTCLoss(blank=tokenizer.blank, reduction="mean")
+        dataset = StreamingTrialDataset(train_rows, tokenizer, n_samples=self.n_samples)
+        model.train()
+        for _ in range(max(1, epochs)):
+            order = sorted(range(len(dataset)), key=lambda i: str(train_rows[i].run_path))
+            for start in range(0, len(order), batch_size):
+                batch = collate([dataset[i] for i in order[start : start + batch_size]])
+                optimiser.zero_grad(set_to_none=True)
+                logits = model(batch["eeg"].to(device))
+                loss = criterion(
+                    logits.log_softmax(-1).transpose(0, 1),
+                    batch["targets"].to(device),
+                    model.input_lengths_to_output(batch["input_lengths"].to(device)),
+                    batch["target_lengths"].to(device),
+                )
+                if torch.isfinite(loss):
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(trainable, 5.0)
+                    optimiser.step()
+        model.eval()
+        self.model = model
+
+    def transcribe(self, rows) -> list[str]:
+        from bci_eeg_to_text.decode import greedy_decode
+        from bci_eeg_to_text.streaming import StreamingTrialDataset
+
+        dataset = StreamingTrialDataset(rows, self.tokenizer, n_samples=self.n_samples)
+        texts: list[str] = []
+        ordered = sorted(range(len(dataset)), key=lambda i: str(rows[i].run_path))
+        with torch.no_grad():
+            for start in range(0, len(ordered), 8):
+                chunk = ordered[start : start + 8]
+                eeg = torch.stack([dataset[i]["eeg"] for i in chunk]).to(self.device)
+                logits = self.model(eeg)
+                lengths = self.model.input_lengths_to_output(
+                    torch.tensor([eeg.shape[-1]] * len(chunk))
+                )
+                decoded = greedy_decode(logits, self.tokenizer, lengths)
+                texts.extend(t for _, t in sorted(zip(chunk, decoded, strict=True)))
+        return texts
+
+
 class EchoExperiment:
     """ECHO: reuse the published FAST encoder, fine-tune connect + Whisper.
 
@@ -204,6 +295,18 @@ def _load_rows(dataset: str, data_root: Path | None):
     return index_chineseeeg(root, verbose=False)
 
 
+def _local_bert() -> str | None:
+    """A BERT folder on disk, if one exists; otherwise None (build from config)."""
+    for candidate in (
+        Path.home() / "hf-models" / "bert-base-chinese",
+        Path.home() / "hf-models" / "bert-base-multilingual-cased",
+        Path("hf-models") / "bert-base-chinese",
+    ):
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
 def _dataset_path(dataset: str, data_root: Path | None) -> Path:
     if data_root is not None:
         return data_root
@@ -251,16 +354,34 @@ def execute(
     thought2text_dir: Path,
     hf_models: Path,
     use_mlflow: bool,
+    max_temp: float = 80.0,
+    thermal_interval: float = 10.0,
     printer=print,
     table=None,
 ) -> int:
     """Run the benchmark and print results. Returns a process exit code."""
+    from bci_eeg_to_text import thermal
     from bci_eeg_to_text.benchmark import score
     from bci_eeg_to_text.benchmark_cli import collect_statuses
     from bci_eeg_to_text.smoke import fold_indices, select_smoke_runs
     from bci_eeg_to_text.tokenizer import CharTokenizer
 
     started = time.time()
+    # Check before doing any work: an already-hot machine should not be loaded
+    # further, and this machine's fan is broken.
+    try:
+        baseline = thermal.require_cool(max_temp)
+    except thermal.ThermalError as exc:
+        printer(f"refusing to run: {exc}")
+        return 2
+    printer(f"baseline {baseline.describe()}")
+
+    guard = thermal.ThermalGuard(
+        max_temp,
+        interval=thermal_interval,
+        on_sample=lambda s: printer(f"  {s.describe()}"),
+    )
+
     if device == "auto":
         device_obj = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
@@ -321,7 +442,7 @@ def execute(
             if not status.available:
                 all_rows.append({"model": status.name, "reason": status.reason})
                 continue
-            if status.name != "conv-transformer":
+            if status.name not in ("conv-transformer", "conv-bert"):
                 all_rows.append(
                     {
                         "model": status.name,
@@ -333,12 +454,24 @@ def execute(
 
             fold_scores = []
             for fold_index, (train_idx, _valid_idx, test_idx) in enumerate(folds):
+                # Between folds is the cheapest safe point to sample: each fold
+                # is minutes long, and a breach aborts the whole benchmark.
+                try:
+                    guard.poll()
+                except thermal.ThermalError as exc:
+                    printer(f"aborting: {exc}")
+                    printer(guard.summary())
+                    return 3
                 train_runs = {run_ids[i] for i in train_idx}
                 test_runs = {run_ids[i] for i in test_idx}
                 train_rows = [r["obj"] for r in chosen if str(r["run_id"]) in train_runs]
                 test_rows = [r["obj"] for r in chosen if str(r["run_id"]) in test_runs]
                 tokenizer = CharTokenizer.build([r.text for r in train_rows])
-                experiment = ConvTransformerExperiment()
+                experiment = (
+                    ConvBertExperiment(pretrained=_local_bert())
+                    if status.name == "conv-bert"
+                    else ConvTransformerExperiment()
+                )
                 t0 = time.time()
                 experiment.prepare(
                     train_rows,
@@ -347,6 +480,12 @@ def execute(
                     epochs=epochs,
                     batch_size=batch_size,
                 )
+                try:
+                    guard.poll()
+                except thermal.ThermalError as exc:
+                    printer(f"aborting: {exc}")
+                    printer(guard.summary())
+                    return 3
                 hypotheses = experiment.transcribe(test_rows)
                 refs = [r.text for r in test_rows]
                 result = score(refs, hypotheses)
@@ -374,5 +513,6 @@ def execute(
     printer("")
     if table is not None:
         printer(table(all_rows))
-    printer(f"\n{time.time() - started:.0f}s elapsed; results in {out / 'results.json'}")
+    printer(f"\n{guard.summary()}")
+    printer(f"{time.time() - started:.0f}s elapsed; results in {out / 'results.json'}")
     return 0

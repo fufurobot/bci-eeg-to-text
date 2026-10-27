@@ -168,10 +168,14 @@ class TestCliWiring:
     def test_model_choices_cover_the_four_experiments(self) -> None:
         from bci_eeg_to_text.benchmark_cli import BENCHMARK_MODELS
 
+        # Five rows now: conv-bert was added as the smoke-test priority, since
+        # its ~110M parameters fit this machine where NeuroLM-XL (20 GB) and
+        # Mistral-7B (21 GB) do not.
         assert set(BENCHMARK_MODELS) == {
+            "conv-bert",
+            "conv-transformer",
             "echo",
             "thought2text",
-            "conv-transformer",
             "neurolm",
         }
 
@@ -190,9 +194,15 @@ class TestFourRows:
         from bci_eeg_to_text.benchmark_cli import collect_statuses
 
         statuses = collect_statuses("all", echo_ckpt=tmp_path / "none.ckpt")
-        assert len(statuses) == 4
+        assert len(statuses) == 5
         names = {s.name for s in statuses}
-        assert names == {"echo", "thought2text", "conv-transformer", "neurolm"}
+        assert names == {
+            "conv-bert",
+            "conv-transformer",
+            "echo",
+            "thought2text",
+            "neurolm",
+        }
         # Unavailable ones must carry a reason.
         for status in statuses:
             if not status.available:
