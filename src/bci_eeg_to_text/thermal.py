@@ -96,8 +96,7 @@ class ThermalState:
         if not self.readings:
             return "temperature: unknown (no sensors readable)"
         parts = [
-            f"{r.sensor}={r.celsius:.0f}C/{self.limit_for(r.kind):.0f}C"
-            for r in self.readings
+            f"{r.sensor}={r.celsius:.0f}C/{self.limit_for(r.kind):.0f}C" for r in self.readings
         ]
         verdict = "ok" if self.ok else "OVER LIMIT"
         return (

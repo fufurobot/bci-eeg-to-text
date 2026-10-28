@@ -20,9 +20,7 @@ def fake_state(*temps: tuple[str, float], limit: float = 80.0) -> thermal.Therma
     """Build a state; ``gpu*`` sensors get the hard limit, others the CPU one."""
     return thermal.ThermalState(
         readings=[
-            thermal.Reading(
-                sensor=s, celsius=c, kind="gpu" if s.startswith("gpu") else "cpu"
-            )
+            thermal.Reading(sensor=s, celsius=c, kind="gpu" if s.startswith("gpu") else "cpu")
             for s, c in temps
         ],
         limit=limit,
@@ -96,7 +94,8 @@ class TestReadingSensors:
 class TestRequireCool:
     def test_raises_when_already_hot(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            thermal, "snapshot",
+            thermal,
+            "snapshot",
             lambda limit=80.0, cpu_limit=88.0: fake_state(("gpu", 85)),
         )
         with pytest.raises(thermal.ThermalError, match="exceeds"):
@@ -104,7 +103,8 @@ class TestRequireCool:
 
     def test_passes_when_cool(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            thermal, "snapshot",
+            thermal,
+            "snapshot",
             lambda limit=80.0, cpu_limit=88.0: fake_state(("gpu", 60)),
         )
         assert thermal.require_cool().ok
