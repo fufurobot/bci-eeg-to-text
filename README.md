@@ -213,6 +213,83 @@ mount the error names the flag to drop rather than raising a bare `OSError`.
 The two datasets both use bare `sub-NN` ids, so merged mode namespaces them
 (`chisco:sub-01`, `chineseeeg:sub-04`); without that they would collide.
 
+## Getting the data
+
+Both corpora are OpenNeuro datasets published as **DataLad / git-annex**
+repositories. Git holds only the metadata (a few MB); the recordings live in
+annex and are fetched on demand. The correct way to obtain them is DataLad:
+
+```bash
+mkdir -p ~/bci-data && cd ~/bci-data
+
+# 1. Clone the metadata. This is small and fast.
+datalad clone https://github.com/OpenNeuroDatasets/ds004952.git
+datalad clone https://github.com/OpenNeuroDatasets/ds005170.git
+
+# 2. Fetch only what you need, from INSIDE the cloned dataset.
+cd ds004952
+datalad get derivatives/preproc/filtered_0.5_80/sub-04    # one participant
+cd ../ds005170
+datalad get -n .                                          # metadata only
+
+# 3. Point the tooling at the result.
+export EEG_TEXT_BCI_DATA_ROOT=$HOME/bci-data
+export EEG_TEXT_BCI_DATA_SUBDIR=.
+bci dataset list
+```
+
+Fetching a whole corpus is ~419 GB and is not needed to start: the smoke
+benchmark uses **ten runs from a single participant**, so `datalad get` on one
+subject directory is enough to produce a number.
+
+```bash
+bci benchmark eeg2text --model conv-bert --dataset chineseeeg --smoke
+```
+
+### Two requirements that fail quietly
+
+**`datalad get` only works from inside the cloned dataset.** Run it from the
+dataset root (or pass `-d <dataset>`), not from a parent directory and not on
+paths belonging to a different clone. Given a path outside the dataset it does
+not raise — it reports `"no dataset annex, content already present"` and leaves
+the file at its 220-byte pointer.
+
+**`git-annex` must be installed, and DataLad does not require it.** Retrofitting
+a plain `git clone` with `datalad` gives a repository that has `.datalad/` but
+no `.git/annex/`. Every `datalad get` then exits **0** with no output and
+fetches nothing. Install the backend first:
+
+| system | command |
+| --- | --- |
+| Debian/Ubuntu | `sudo apt install git-annex datalad` |
+| Arch | `sudo pacman -S git-annex datalad` |
+| no root | `uv tool install datalad`, then obtain `git-annex` separately |
+
+Verify before trusting a download:
+
+```bash
+git annex version                       # must print a version
+cd ds004952 && datalad -f json get <path>   # status should be "ok", not "notneeded"
+```
+
+### An annex pointer is not missing data
+
+An unfetched file is a symlink into `.git/annex/objects`. A dataset can be
+cloned with 100% of its metadata and 0% of its bytes. The tooling reports such
+runs as unfetched rather than silently scoring zeros — and because a real
+`.vhdr` header can sit beside a stubbed `.eeg` payload, both files are checked:
+that combination opens without error and only later reports zero samples.
+
+### What not to do
+
+- **Don't `rsync`/`cp` a mounted copy.** It reads `.git/annex/objects`, which
+  duplicates content the working tree already exposes, and a cheap USB driver
+  drops off the bus under sustained load mid-copy.
+- **Don't hand-roll HTTP fetches of annex objects.** It is possible (OpenNeuro's
+  S3 bucket keys objects by dataset-relative path), but nothing verifies a hash,
+  throughput collapses under concurrency, and a truncated transfer is
+  indistinguishable from a complete one unless you compare sizes yourself.
+
 ## Dataset notes
 
 - The 46 git-annex pointers in ds005170 are **deliberate** — the drive is too
