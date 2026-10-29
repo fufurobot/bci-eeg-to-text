@@ -387,3 +387,42 @@ class TestVhdrRepair:
         vhdr.write_text("DataFile=sub-01_ses-GranettDream_missing.eeg\n")
         path, changed = readable_vhdr(vhdr, tmp_path / "work")
         assert (path, changed) == (vhdr, False)
+
+
+def test_vhdr_repair_repoints_a_stale_mirror_link(tmp_path) -> None:
+    """A mirror can outlive the dataset location it points at.
+
+    The mirror is reused across runs, so its symlinks may resolve to a path
+    that has since moved (a remounted drive, a copied tree). Such a link is
+    present but dangling; trusting its existence made MNE fail later with a
+    bare FileNotFoundError naming a file that looked like it should be there.
+    """
+    from bci_eeg_to_text.chineseeeg import readable_vhdr
+
+    data = tmp_path / "data" / "sub-01" / "ses-GarnettDream" / "eeg"
+    data.mkdir(parents=True)
+    (data / "sub-01_ses-GarnettDream_task-reading_run-01_eeg.eeg").write_bytes(b"\0" * 64)
+    (data / "sub-01_ses-GarnettDream_task-reading_run-01_eeg.vmrk").write_text("Mk1=1")
+    vhdr = data / "sub-01_ses-GarnettDream_task-reading_run-01_eeg.vhdr"
+    vhdr.write_text(
+        "Brain Vision Data Exchange Header File Version 1.0\n\n"
+        "[Common infos]\n"
+        "DataFile=sub-01_ses-GranettDream_task-reading_run-01_eeg.eeg\n"
+        "MarkerFile=sub-01_ses-GranettDream_task-reading_run-01_eeg.vmrk\n"
+    )
+
+    work = tmp_path / "mirror"
+    first, repaired = readable_vhdr(vhdr, work)
+    assert repaired and first.exists()
+
+    # Simulate the dataset moving: the mirror now points somewhere that is gone.
+    link = next(p for p in first.parent.iterdir() if p.suffix == ".eeg")
+    assert link.is_symlink()
+    link.unlink()
+    link.symlink_to(tmp_path / "gone" / link.name)
+    assert not link.resolve().exists()
+
+    second, repaired_again = readable_vhdr(vhdr, work)
+    assert repaired_again
+    relinked = next(p for p in second.parent.iterdir() if p.suffix == ".eeg")
+    assert relinked.resolve().exists(), "stale mirror link was not repointed"

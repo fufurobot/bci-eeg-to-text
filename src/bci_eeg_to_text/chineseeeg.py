@@ -258,11 +258,21 @@ def readable_vhdr(vhdr: Path, work_dir: Path) -> tuple[Path, bool]:
 
         for name, source in wanted_names:
             link = mirror / name
-            if link.is_symlink() or link.exists():
+            target = source.resolve()
+            # A mirror persists across runs, so an existing link may point at a
+            # dataset location that has since moved (a remounted drive, a copied
+            # tree). Verify the target rather than trusting the name: a stale
+            # absolute link is present but resolves to nothing, which surfaces
+            # much later as a confusing FileNotFoundError from MNE.
+            if link.is_symlink():
+                if link.resolve() == target and target.exists():
+                    continue
+                link.unlink()
+            elif link.exists():
                 continue
             # Absolute target: a relative link would resolve against the mirror
             # directory, not the dataset.
-            link.symlink_to(source.resolve())
+            link.symlink_to(target)
 
         repaired = mirror / vhdr.name
         repaired.write_text(fixed, encoding="utf-8")
