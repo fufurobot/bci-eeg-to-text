@@ -111,6 +111,10 @@ def index_chineseeeg(
 
     source = get_source("chineseeeg", data_root=data_root)
     trials: list[EchoTrial] = []
+    # Reading a workbook costs seconds (openpyxl on a 250 KB xlsx measured ~9 s
+    # here, and importing pandas ~28 s), so each file is parsed once and reused
+    # across the runs that share it.
+    novel_cache: dict[Path, list[str]] = {}
     # Keyed by (subject, text file): every participant reads the SAME novel, so
     # deduplicating by text file alone would index only the first subject.
     seen: set[tuple[str, Path]] = set()
@@ -142,7 +146,10 @@ def index_chineseeeg(
             continue
         try:
             intervals = row_intervals(read_events(events_path))
-            texts = read_segmented_novel(text_path)
+            texts = novel_cache.get(text_path)
+            if texts is None:
+                texts = read_segmented_novel(text_path)
+                novel_cache[text_path] = texts
         except Exception:  # noqa: BLE001 - a bad run must not stop indexing
             continue
         if len(intervals) != len(texts):
