@@ -4,6 +4,13 @@
 [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/fufurobot/bci-eeg-to-text/main?filepath=notebooks)
 [![CI](https://github.com/fufurobot/bci-eeg-to-text/actions/workflows/ci.yml/badge.svg)](https://github.com/fufurobot/bci-eeg-to-text/actions/workflows/ci.yml)
 
+| | |
+| --- | --- |
+| **What** | EEG-to-text decoding with CTC, plus a multi-model benchmark harness |
+| **Corpora** | ChineseEEG (ds004952), Chisco (ds005170) |
+| **Entrypoints** | `bci dataset`, `bci experiment`, `bci benchmark`, `bci split`, `bci train` |
+| **Status** | pipeline verified end to end; **accuracy not yet established** ([Status](#status)) |
+
 Training an EEG-to-text decoder with **CTC loss** over EEG-text datasets.
 
 The architecture is deliberately dataset-agnostic: a dataset is only a source of
@@ -33,8 +40,8 @@ would otherwise be mostly dead weight; `.devcontainer/setup.sh` and
 In Codespaces:
 
 ```bash
-uv run pytest -q -m "not realdata"     # 400+ tests, no dataset needed
-uv run bci-eeg-to-text --help
+uv run pytest -q -m "not realdata"   # 561 tests, no dataset needed
+uv run bci --help                    # list every entrypoint
 ```
 
 The EEG corpora are **not** included — they are 419 GB across two OpenNeuro
@@ -43,8 +50,10 @@ it with DataLad and point the tools at it:
 
 ```bash
 export EEG_TEXT_BCI_DATA_ROOT=/path/to/bci-eeg
-uv run bci-eeg-to-text split --dataset chineseeeg --link
+uv run bci dataset prepare chineseeeg --out splits
 ```
+
+See [Getting the data](#getting-the-data) for the full DataLad workflow.
 
 ## Alignment is the hard part, and it differs per dataset
 
@@ -290,6 +299,130 @@ that combination opens without error and only later reports zero samples.
   throughput collapses under concurrency, and a truncated transfer is
   indistinguishable from a complete one unless you compare sizes yourself.
 
+## Running experiments: one entrypoint per concern
+
+Datasets and experiments are addressed **by name**, so adding a corpus or a
+future EEG task does not mean new flags on every command:
+
+```bash
+bci dataset list                        # what corpora exist
+bci dataset info chineseeeg             # rates, subjects, text granularity
+bci dataset prepare chineseeeg --out splits   # delegates to `split`
+
+bci experiment list                     # what can be run
+bci experiment run conv-transformer --dataset chineseeeg --smoke
+```
+
+`bci experiment run` validates placement **before** any work starts:
+`--training-mode {cpu,gpu,ssh}` and `--strategy {dataparallel,fsdp}`.
+Asking for `gpu` without a CUDA device raises instead of quietly running on CPU,
+which here is roughly two orders of magnitude slower and would look like a
+modelling failure rather than a configuration mistake.
+
+## Benchmark
+
+Five experiments are scored through one harness, so no two rows can be measured
+with different metrics:
+
+| row | model | trains here? |
+| --- | --- | --- |
+| `conv-bert` | conv front-end + BERT encoder + CTC | yes (in process) |
+| `conv-transformer` | conv front-end + transformer encoder + CTC, one forward pass | yes (in process) |
+| `echo` | [ECHO](https://huggingface.co/wythedee/ECHO): FAST encoder, projection, Whisper decoder | needs external weights |
+| `thought2text` | [Thought2Text](https://github.com/jingweiluo/Thought2Text): ChannelNet + LLM | needs base LLM + LoRA |
+| `neurolm` | NeuroLM NeuralTransformerVQ + adapter | needs external weights |
+
+```bash
+# smoke: 10 runs holding 5 texts from ONE subject, 5-fold 3-1-1
+bci benchmark eeg2text --model conv-bert --dataset chineseeeg --smoke
+
+# several corpora in one pass
+bci benchmark eeg2text --model all --dataset chineseeeg --dataset chisco
+```
+
+`--smoke` selects 10 runs containing five distinct texts from a single subject,
+two runs per text, then cross-validates 3-1-1 (6 train / 2 valid / 2 test) so
+every run is tested exactly once. The selector **raises** when a corpus cannot
+supply that sample rather than quietly returning fewer runs — a shrunken sample
+silently compares numbers computed on different data.
+
+A row that cannot run is reported as a **skip with a reason**, never as a zero.
+A fabricated baseline score is worse than an acknowledged gap.
+
+### What a smoke run does and does not tell you
+
+A smoke run proves the pipeline end to end — index, stream, train, decode,
+score, report — and nothing about accuracy. Measured on the cluster machine:
+
+```
+conv-bert        cer=1.000   exact=0.000   n=5139   451s
+thermal: 10 samples, peak 51C
+```
+
+`CER 1.000` means the decoder emitted nothing. The pipeline was verified healthy
+separately (CTC loss fell 87.4 → 8.2 over 30 steps, with 72 frames for at most
+12 target characters), so this is **under-training, not a broken model**: a fold
+trains on ~6 runs for a few minutes, and CTC needs far more than that before
+greedy decoding produces its first character.
+
+## Training safely
+
+The development machine's fan is broken and cooling is external, so temperature
+is a safety constraint rather than a metric:
+
+```bash
+bci benchmark eeg2text --model conv-bert --dataset chineseeeg --smoke \
+  --max-temp 80 --max-cpu-temp 88 --thermal-interval 60
+```
+
+| flag | default | meaning |
+| --- | --- | --- |
+| `--max-temp` | 80 | GPU ceiling (hard limit) |
+| `--max-cpu-temp` | 88 | CPU ceiling, looser because the external cooling cannot hold it lower |
+| `--thermal-interval` | 10 | seconds between samples while running |
+
+Sensors are read from `/sys/class/thermal` and `nvidia-smi`. A run **refuses to
+start** when a sensor is already above its limit, and **aborts** at the first
+breach rather than logging a warning while continuing to heat the CPU. An
+unreadable machine is treated as *unknown*, never as cool.
+
+## Status
+
+What is proven, and how:
+
+| area | state |
+| --- | --- |
+| CTC pipeline (tokenizer, model, loss, decoder, metrics) | tested; loss falls 87.4 → 8.2 over 30 steps |
+| Streaming reads from the corpus | tested; no data is copied |
+| Splits and the leakage matrix | tested; runs on real data |
+| Benchmark harness + smoke sampling | tested; produced a real result on real data |
+| Thermal guard | tested; enforced live (refused to start at 84 °C, then ran at 51 °C peak) |
+| Training modes / FSDP / multi-hop SSH | tested; **not** exercised on a real cluster |
+| HuggingFace release folder | tested round-trip; **not** yet published to the Hub |
+| Accuracy on either corpus | **not established** — see below |
+
+### Not established yet
+
+- **No meaningful accuracy number.** Every run so far used one participant and
+  minutes of training, which is enough to prove the plumbing and not enough for
+  CTC to emit text. A real result needs the full corpus and hours, not minutes.
+- **Only sub-04 of ChineseEEG (ds004952) has been trainable.** Other
+  participants' recordings exist as git-annex pointers; resolving them needs
+  `git-annex` installed and `datalad get`, which this environment could not
+  complete. ds005170 (Chisco) has not been trained on at all.
+- **`bci experiment run` validates and plans; it does not yet launch a
+  distributed job.** It resolves the topology, probes SSH reachability, chooses
+  the strategy and prints the exact command it would run. `--smoke` hands off to
+  the benchmark runner, which does train.
+- **Baselines are not measured.** ECHO's weights load and its shape is reported
+  (Whisper decoder, vocab 51,865, d_model 384), but the weights were published
+  without the `FAST`/`EEG2Text` code, so it cannot be instantiated. Thought2Text
+  needs a base LLM plus stage-2 LoRA adapters. Both report a skip with that
+  reason rather than a score.
+
+Recording these limits is deliberate: a README that implies proven accuracy
+invites someone to cite a number that does not exist.
+
 ## Dataset notes
 
 - The 46 git-annex pointers in ds005170 are **deliberate** — the drive is too
@@ -313,10 +446,25 @@ split_data_N.xlsx ──────────┘
 | --- | --- |
 | `dataconfig.py` | dataset location resolution, symlinked split materialisation |
 | `splittree.py` | reading split trees; leakage detection |
-| `leakage.py` | text leakage modes over rows, paragraphs and articles |
+| `leakage.py` | leakage matrix: subject, text, sex and run axes |
 | `textstructure.py` | recovering row/paragraph/article identity from source novels |
 | `splitdata.py` | turning a split tree into training datasets |
-| `backbones.py` | interchangeable encoders (`scratch`, `bert-ctc`, NeuroLM modes) |
+| `streaming.py` | **index + random-access reads straight from the corpus**; no copies |
+| `backbones.py` | interchangeable encoders (`scratch`, `conv-transformer`, `bert-ctc`, NeuroLM modes) |
+| `conv_transformer.py` | conv front-end + pre-norm transformer encoder |
+| `hf_model.py` | HuggingFace-native model, config, and the any-folder backbone loader |
+| `hf_tokenizer.py` | HuggingFace tokenizer wrapping the character vocabulary |
+| `hf_processor.py` | HuggingFace processor for EEG crop/pad plus labels |
+| `hf_release.py` | builds a self-contained, publishable model folder |
+| `accelerated.py` | `accelerate` training loop, scheduler, CTC eval |
+| `distributed.py` | training modes (cpu/gpu/ssh) and strategies (dataparallel/fsdp) |
+| `thermal.py` | temperature monitoring and enforcement |
+| `benchmark.py` | adapters and scoring shared by every experiment |
+| `benchmark_runner.py` | the in-process experiments and the fold runner |
+| `benchmark_cli.py` | the `benchmark eeg2text` command |
+| `smoke.py` | smoke sampling and 3-1-1 fold construction |
+| `registry.py` | dataset and experiment registries |
+| `entrypoints.py` | the `dataset` and `experiment` commands |
 | `neurolm.py` | loading NeuroLM components and checkpoints |
 | `neurolm_native.py` | native NeuroLM tokenizer (patch embed, transformer, VQ) |
 | `sources.py` | `DatasetSource` protocol, registry, `participants.tsv` parsing |
@@ -330,7 +478,7 @@ split_data_N.xlsx ──────────┘
 | `model.py` | strided convolutional encoder + CTC head |
 | `decode.py` | greedy / prefix beam search, CER, sentence accuracy |
 | `train.py` | training and evaluation loops |
-| `cli.py` | `prepare`, `split`, `inspect`, `train`, `evaluate` |
+| `cli.py` | `prepare`, `split`, `inspect`, `train`, `benchmark`, `dataset`, `experiment`, `evaluate` |
 
 ## Training modes
 
@@ -430,24 +578,55 @@ credential-free template.
 
 ## Usage
 
+The common path, start to finish:
+
 ```bash
-# 1. who is available, and how are the splits formed?
-uv run bci-eeg-to-text split --dataset merged
+# 1. stage the data (see "Getting the data"), then point the tools at it
+export EEG_TEXT_BCI_DATA_ROOT=$HOME/bci-data
+export EEG_TEXT_BCI_DATA_SUBDIR=.
 
-# 2. extract (EEG, text) pairs. Raw data is huge; this is done once.
-uv run bci-eeg-to-text prepare --dataset chineseeeg --out cache/trials
-uv run bci-eeg-to-text prepare --dataset chisco     --out cache/trials
-uv run bci-eeg-to-text prepare --dataset merged     --out cache/trials
+# 2. see who is available and how the split is formed
+bci dataset list
+bci split --dataset merged
 
-# 3. what is in one run? reports markers vs text and whether they align
-uv run bci-eeg-to-text inspect \
-  eeg-text-bci-data/bci-eeg/ds005170/sub-01/ses-02/eeg/sub-01_ses-02_task-imagine_run-010_eeg.edf
+# 3. materialise the split as a symlink tree (nothing is copied)
+bci dataset prepare chineseeeg --out splits --leakage paragraph
 
-# 4. train and evaluate (device auto-detects: cuda if usable, else cpu)
-uv run bci-eeg-to-text train --cache cache/trials --out runs/exp1 --epochs 10
-uv run bci-eeg-to-text evaluate --cache cache/trials --checkpoint runs/exp1/last.pt \
-  --beam-width 8
+# 4. prove the pipeline on a tiny slice
+bci benchmark eeg2text --model conv-bert --dataset chineseeeg --smoke
+
+# 5. inspect the launch plan a distributed run would use (validates placement
+#    and prints the command; it does not start training yet)
+bci experiment run conv-transformer --dataset chineseeeg \
+  --training-mode ssh --strategy fsdp --hosts jump:22|worker:4
+
+# 6. inspect one run when alignment looks wrong
+bci inspect eeg-text-bci-data/bci-eeg/ds005170/sub-01/ses-02/eeg/\
+sub-01_ses-02_task-imagine_run-010_eeg.edf
 ```
+
+The lower-level commands remain available. `train` reads a **split tree**, so the
+split governs what is trained on, and `--cache` still exists for quick
+experiments but carries no split information — validation then falls back to a
+holdout and says so.
+
+### Published model folders
+
+A trained model can be written as a standard HuggingFace folder and loaded with
+the stock entry points:
+
+```python
+from transformers import AutoModel, AutoTokenizer, AutoProcessor
+
+model = AutoModel.from_pretrained("release/", trust_remote_code=True)
+```
+
+The folder is **self-contained**: `hf_release.py` vendors the architecture,
+config, tokenizer and processor beside the weights, so loading it does not
+require this package to be installed. `load_any_backbone` accepts any folder
+`AutoModel` can load with `trust_remote_code=True`; non-EEG architectures are
+adapted (channels projected to the model's width, time axis pooled to
+`max_position_embeddings`) rather than rejected.
 
 ## Tests
 

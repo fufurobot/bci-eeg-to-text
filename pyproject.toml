@@ -18,6 +18,9 @@ dependencies = [
 
 [project.scripts]
 bci-eeg-to-text = "bci_eeg_to_text.cli:main"
+# Short alias. `bci <command>` is the form used throughout the README and the
+# benchmark interface, and typing the long name for every subcommand is noise.
+bci = "bci_eeg_to_text.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.23,<0.13.0"]
