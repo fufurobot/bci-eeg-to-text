@@ -66,7 +66,10 @@ class ConvTransformerConfig:
 
 
 class ConvStage(nn.Module):
-    """A strided convolution followed by LayerNorm, GELU and a residual path.
+    """A strided convolution followed by GroupNorm, GELU and a residual path.
+
+    GroupNorm with one group normalises across the whole channel axis, which is
+    what a conv feature map wants; the transformer blocks use LayerNorm instead.
 
     When the stride exceeds 1 the residual branch is downsampled and re-projected
     with a 1x1 convolution so the shapes match; that keeps the residual exact

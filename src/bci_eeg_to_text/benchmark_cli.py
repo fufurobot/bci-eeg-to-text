@@ -48,7 +48,7 @@ def add_benchmark_subparser(sub: argparse._SubParsersAction) -> None:
         "--model",
         default="all",
         choices=[*BENCHMARK_MODELS, "all"],
-        help="experiment to run; 'all' runs the four named ones",
+        help=f"experiment to run; 'all' runs all {len(BENCHMARK_MODELS)}",
     )
     p.add_argument(
         "--dataset",

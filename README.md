@@ -488,6 +488,7 @@ The encoder is interchangeable; the CTC loss, decoder and metrics are shared.
 | mode | encoder | typical use |
 | --- | --- | --- |
 | `scratch` | strided conv encoder | baseline, no downloads |
+| `conv-transformer` | conv front-end + transformer encoder | strongest in-process row; see below |
 | `bert-ctc` | pretrained HuggingFace BERT + CTC head | reuse language representations |
 | `neurolm-sft` | full [NeuroLM](https://github.com/935963004/NeuroLM) model | supervised fine-tuning |
 | `neurolm-adapter` | HuggingFace causal LM + adapter | bridge a NeuroProcessor to an LM |
@@ -534,6 +535,73 @@ two parts. A trial shared between train and test inflates scores while looking
 like a good model, so it is an error rather than a warning. `--cache` still
 exists for quick experiments but carries no split information, so validation
 falls back to a holdout from the training data and says so.
+
+### The conv-transformer encoder
+
+`conv-transformer` is the architecture this project trains from scratch, and the
+one drawn here. A convolutional front-end compresses the raw trial, then pre-norm transformer
+blocks attend over the whole trial at once, and a linear head emits one
+character distribution per frame. CTC does the alignment, so the whole sentence
+comes out of a **single forward pass** — there is no autoregressive loop.
+
+```mermaid
+flowchart TD
+    subgraph IN["EEG trial"]
+        A["raw EEG<br/>128 ch x 1152 samples<br/>(18 s @ 64 Hz)"]
+    end
+
+    subgraph CONV["conv front-end — stride 32 in total"]
+        B["ConvStage 1<br/>Conv1d 128→128, k=7, s=2<br/>GroupNorm(1) → GELU"]
+        C["ConvStage 2<br/>Conv1d 128→256, k=7, s=2<br/>GroupNorm(1) → GELU"]
+        D["ConvStage 3<br/>Conv1d 256→384, k=7, s=8<br/>GroupNorm(1) → GELU"]
+        E["1x1 conv 384→256<br/>→ transpose to sequence"]
+    end
+
+    subgraph ENC["transformer encoder — 4 layers, 8 heads, d=256"]
+        F["+ learned positional embedding<br/>(parameter, max 512 frames)"]
+        G["PreNormEncoderLayer x4<br/>x = x + Attention(LayerNorm(x))<br/>x = x + FFN(LayerNorm(x))"]
+        H["LayerNorm"]
+    end
+
+    subgraph HEAD["CTC head"]
+        I["Linear 256 → 1002<br/>(blank at index 0)"]
+        J["per-frame logits<br/>2 x 36 x 1002"]
+        K["CTC loss<br/>(train)"]
+        L["greedy / prefix beam decode<br/>(inference)"]
+    end
+
+    A --> B --> C --> D --> E --> F --> G --> H --> I --> J
+    J --> K
+    J --> L
+    K -.->|"gradients"| D
+
+    style A fill:#e8f0fe,stroke:#4285f4
+    style G fill:#fef7e0,stroke:#f9ab00
+    style J fill:#e6f4ea,stroke:#34a853
+```
+
+Shapes as actually produced by the code (batch of 2, verified against the
+implementation, not sketched from the config):
+
+| stage | tensor |
+| --- | --- |
+| input | `(2, 128, 1152)` |
+| after conv stack | `(2, 384, 36)` |
+| to model width | `(2, 36, 256)` |
+| head logits | `(2, 36, 1002)` |
+
+Three details that matter more than they look:
+
+- **Each stage is residual.** When the stride is 1 and the width is unchanged the
+  shortcut is the identity; otherwise it is a strided convolution. Average
+  pooling was rejected because it computes `floor(n/s)` while the main conv
+  computes `floor((n-1)/s)+1` — the shorter path silently dropped a frame.
+- **GroupNorm in the conv stages, LayerNorm in the transformer.** One channel
+  per group normalises across the whole channel axis, which is what a conv
+  feature map wants; residual blocks use pre-norm LayerNorm.
+- **Attention is bidirectional.** Padding is excluded with a key mask, but
+  otherwise every frame sees every other frame — that is what lets a single
+  forward pass commit to a whole sentence.
 
 ### Why these work the way they do
 
