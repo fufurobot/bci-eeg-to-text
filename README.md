@@ -546,25 +546,25 @@ comes out of a **single forward pass** — there is no autoregressive loop.
 
 ```mermaid
 flowchart TD
-    subgraph IN["EEG trial"]
+    subgraph EEG["EEG trial"]
         A["raw EEG<br/>128 ch x 1152 samples<br/>(18 s @ 64 Hz)"]
     end
 
-    subgraph CONV["conv front-end — stride 32 in total"]
-        B["ConvStage 1<br/>Conv1d 128→128, k=7, s=2<br/>GroupNorm(1) → GELU"]
-        C["ConvStage 2<br/>Conv1d 128→256, k=7, s=2<br/>GroupNorm(1) → GELU"]
-        D["ConvStage 3<br/>Conv1d 256→384, k=7, s=8<br/>GroupNorm(1) → GELU"]
-        E["1x1 conv 384→256<br/>→ transpose to sequence"]
+    subgraph CONV["conv front-end - stride 32 in total"]
+        B["ConvStage 1<br/>Conv1d 128 to 128, k=7, s=2<br/>GroupNorm(1) then GELU"]
+        C["ConvStage 2<br/>Conv1d 128 to 256, k=7, s=2<br/>GroupNorm(1) then GELU"]
+        D["ConvStage 3<br/>Conv1d 256 to 384, k=7, s=8<br/>GroupNorm(1) then GELU"]
+        E["1x1 conv 384 to 256<br/>transpose to sequence"]
     end
 
-    subgraph ENC["transformer encoder — 4 layers, 8 heads, d=256"]
-        F["+ learned positional embedding<br/>(parameter, max 512 frames)"]
+    subgraph ENC["transformer encoder - 4 layers, 8 heads, d=256"]
+        F["learned positional embedding<br/>(parameter, max 512 frames)"]
         G["PreNormEncoderLayer x4<br/>x = x + Attention(LayerNorm(x))<br/>x = x + FFN(LayerNorm(x))"]
         H["LayerNorm"]
     end
 
-    subgraph HEAD["CTC head"]
-        I["Linear 256 → 1002<br/>(blank at index 0)"]
+    subgraph CTCHEAD["CTC head"]
+        I["Linear 256 to 1002<br/>(blank at index 0)"]
         J["per-frame logits<br/>2 x 36 x 1002"]
         K["CTC loss<br/>(train)"]
         L["greedy / prefix beam decode<br/>(inference)"]
@@ -573,7 +573,7 @@ flowchart TD
     A --> B --> C --> D --> E --> F --> G --> H --> I --> J
     J --> K
     J --> L
-    K -.->|"gradients"| D
+    K -.->|gradients| D
 
     style A fill:#e8f0fe,stroke:#4285f4
     style G fill:#fef7e0,stroke:#f9ab00
